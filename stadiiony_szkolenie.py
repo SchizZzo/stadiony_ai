@@ -1,8 +1,10 @@
+#4
+
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RL pipeline – V3.9
-(no-skip-on-unknown + priors + fair-cost + streak bonus + time-sorted + global streak + allow-duplicates-across-coupons + selective-threshold)
+RL pipeline – V3.7 (no-skip-on-unknown + priors + fair-cost)
 (accuracy-boost + shaped reward + priors-alignment + fair coupon cost + fixed curriculum)
 """
 
@@ -35,6 +37,7 @@ import torch
 import torch.nn as nn
 
 # --- DODATKOWE IMPORTY DLA ROBUST LOADERA ---
+# FIX: odporne ładowanie modelu (naprawia "error return without exception set")
 import zipfile, io
 import cloudpickle as cp
 
@@ -45,6 +48,19 @@ TARGET_DAY_SCORE = 95.0
 TARGET_HIT_PCT   = 98.0
 MAX_PASSES       = 10
 PATIENCE         = 3
+
+
+# === ROBUST LOADER: obsługa 'data' (bez .pkl), 'data.pkl', policy.pth, pytorch_variables.pth ===
+import zipfile, io, torch
+import cloudpickle as cp
+from stable_baselines3 import PPO
+
+# === ROBUST LOADER: wspiera 'data' (bez .pkl) oraz 'data.pkl' + weights-only ===
+import zipfile, io, torch
+import cloudpickle as cp
+from stable_baselines3 import PPO
+
+
 
 # ==============================
 #  Weekend windows
@@ -121,24 +137,10 @@ def _ohe_compatible(**kwargs):
         return OneHotEncoder(handle_unknown="ignore", sparse=False, **kwargs)
 
 def _numeric_coerce(df: pd.DataFrame, meta_cols: set[str]) -> pd.DataFrame:
-    """Convert non-meta object columns to numeric.
-
-    The previous implementation iterated over every column individually,
-    incurring Python-level overhead.  Here we operate on all applicable
-    columns in a single vectorised block which relies on pandas'
-    optimised routines.  This makes the coercion noticeably faster on
-    wide dataframes.
-    """
-
     df = df.copy()
-    object_cols = [c for c in df.select_dtypes(include="object").columns
-                   if c not in meta_cols]
-    if object_cols:
-        df[object_cols] = (
-            df[object_cols]
-            .replace("%", "", regex=True)
-            .apply(pd.to_numeric, errors="coerce")
-        )
+    for col in df.columns:
+        if df[col].dtype == "object" and col not in meta_cols:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace("%", "", regex=False), errors="coerce")
     return df
 
 def build_preprocessor(df_feat: pd.DataFrame) -> Pipeline:
@@ -377,7 +379,7 @@ class StadiumMatchEnv(Env):
     """
     Akcja = (market_act, skip_flag, close_flag)
     """
-    metadata = {"render_modes": ["human"]}
+    metadata = {"render.modes": ["human"]}
 
     def __init__(
         self,
@@ -390,15 +392,10 @@ class StadiumMatchEnv(Env):
         max_bets_to_close: int = 35,
         coupon_price: float = 2.0,
         skip_mask: Optional[np.ndarray] = None,
-        min_prior_for_bet: float = 0.65,   # NEW: twardy próg selekcji (selective prediction)
-        auto_skip_penalty_coef: float = 0.2,  # NEW: delikatna kara za wymuszone auto-skipy
-        prior_topk: int | None = None,
         seed: int = 42,
-        render_mode: str | None = None,
     ):
         super().__init__()
         self.X, self.y, self.meta = X, y, meta
-        self.render_mode = render_mode
 
         # ---- Nagrody / balans – pro-accuracy ----
         self.base_per_correct = 10.0
@@ -407,6 +404,9 @@ class StadiumMatchEnv(Env):
         self.wrong_penalty = 12.0
         self.wide_weights = {
             2: 0.60, 3: 0.60, 4: 0.50,
+            10: 0.90,
+            7: 1.05, 9: 1.05,
+            5: 1.05, 6: 1.05,
         }
         self.length_bonus_per_bet = 1.0
         self.step_hit_bonus = 0.6
@@ -415,33 +415,18 @@ class StadiumMatchEnv(Env):
         self.skip_good_bonus   = 0.8
         self.skip_bad_penalty  = 0.6
 
-        # Dodatkowe ograniczenie dominacji pojedynczych rynków
-        self.max_same_market_ratio = 0.30
-        self.same_market_penalty   = 0.8
-        self.diversity_step_bonus  = 0.2
-        self.diversity_close_bonus = 0.5
+        self.max_same_market_ratio = 1.0
+        self.same_market_penalty   = 0.0
+        self.diversity_step_bonus  = 0.0
+        self.diversity_close_bonus = 0.0
         self.monotony_hard_penalty = 0.0
-        # Dodatkowe kary dla często wybieranych rynków, aby model ich nie preferował
-        # Usunięto preferencyjne kary dla wybranych rynków, by agent miał swobodę wyboru
-        self.market_specific_penalty = {}
+        self.market_specific_penalty = {10: 0.06}
 
+        self.prior_topk = 2
         self.prior_threshold_low = 0.18
         self.invalid_prior_penalty = 0.5
         self.prior_align_bonus_known = 0.25
         self.prior_align_bonus_unknown = 0.35
-
-        # Streak bonuses (kupon)
-        self.streak_step_bonus  = 0.30
-        self.streak_close_bonus = 0.80
-
-        # Globalny streak (po czasie)
-        self.global_streak_step_bonus = 0.25
-        self._global_streak: int = 0
-        self._global_longest_streak: int = 0
-
-        # Selective prediction (twardy próg na prior)
-        self.min_prior_for_bet = float(min_prior_for_bet)
-        self.auto_skip_penalty_coef = float(auto_skip_penalty_coef)
 
         self.total_units = float(total_units)
         self.remaining_units = float(total_units)
@@ -463,11 +448,6 @@ class StadiumMatchEnv(Env):
 
         self.skipped: List[Tuple[int, str, float]] = []
         self.used_match_ids: set[str] = set()
-        self._coupon_taken_keys: set[str] = set()   # duplikaty blokujemy tylko W OBRĘBIE KUPONU
-
-        # kuponowe serie
-        self._coupon_streak: int = 0
-        self._coupon_longest_streak: int = 0
 
         if skip_mask is None:
             self.skip_mask = np.zeros(len(X), dtype=bool)
@@ -479,11 +459,6 @@ class StadiumMatchEnv(Env):
         n_features = X.shape[1]
         self.hist_dim = self.num_markets
         self.prior_dim = self.num_markets
-        # Default to considering all markets in prior-based incentives unless
-        # a specific limit is provided.
-        self.prior_topk = (
-            self.num_markets if prior_topk is None else min(int(prior_topk), self.num_markets)
-        )
 
         obs_low  = np.concatenate([
             np.full(n_features, -1e9, dtype=np.float32),
@@ -514,72 +489,6 @@ class StadiumMatchEnv(Env):
         self._policy_margin_pp: Optional[float] = None
         self._policy_top3: Optional[list] = None
 
-    # === KLUCZE MECZU / DUPLIKATY ===
-    def _norm_id(self, v) -> Optional[str]:
-        if v is None:
-            return None
-        try:
-            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-                return None
-        except Exception:
-            pass
-        s = str(v).strip()
-        if not s or s.lower() in {"nan", "none", "null"}:
-            return None
-        if re.fullmatch(r"\d+\.0", s):  # 123.0 -> 123
-            s = s[:-2]
-        return s
-
-    def _match_keys(self, idx: int) -> list[str]:
-        m = self.meta[idx] if 0 <= idx < len(self.meta) else {}
-        home = str(m.get("home_team", "")).strip().lower()
-        away = str(m.get("away_team", "")).strip().lower()
-
-        keys: list[str] = []
-        idn = self._norm_id(m.get("id_fp"))
-        if idn:
-            keys.append(f"id:{idn}")
-
-        ts_key = ""
-        try:
-            raw = m.get("start_time", None)
-            ts = pd.to_datetime(raw, errors="coerce")
-            if pd.notna(ts):
-                if getattr(ts, "tzinfo", None) is None:
-                    ts = ts.tz_localize("UTC")
-                ts_key = ts.tz_convert("Europe/Warsaw").strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            pass
-
-        if ts_key:
-            keys.append(f"ha:{home}|{away}|t:{ts_key}")
-            keys.append(f"ha:{home}|{away}|d:{ts_key[:10]}")
-        else:
-            keys.append(f"ha:{home}|{away}")
-
-        return keys
-
-    def _sort_key(self, idx: int) -> tuple:
-        """Deterministyczny klucz sortowania: czas, nazwy drużyn, id."""
-        m = self.meta[idx] if 0 <= idx < len(self.meta) else {}
-        # czas
-        try:
-            raw = m.get("start_time", None)
-            ts = pd.to_datetime(raw, errors="coerce")
-            if pd.isna(ts):
-                ts_val = float("inf")
-            else:
-                if getattr(ts, "tzinfo", None) is None:
-                    ts = ts.tz_localize("UTC")
-                ts_val = ts.tz_convert("Europe/Warsaw").timestamp()
-        except Exception:
-            ts_val = float("inf")
-        # tie-breakery
-        home = str(m.get("home_team", "")).strip().lower()
-        away = str(m.get("away_team", "")).strip().lower()
-        idn = self._norm_id(m.get("id_fp")) or f"row{idx}"
-        return (ts_val, home, away, idn)
-
     def set_policy_metrics(self, pct: Optional[float] = None,
                            margin_pp: Optional[float] = None,
                            top3: Optional[list] = None) -> None:
@@ -600,37 +509,32 @@ class StadiumMatchEnv(Env):
         m = self.meta[idx]
         ph = float(m.get("prior_ph", np.nan))
         pa = float(m.get("prior_pa", np.nan))
-        pd_ = float(m.get("prior_pd", np.nan))
+        pd = float(m.get("prior_pd", np.nan))
         gh = float(m.get("prior_gh", np.nan))
         ga = float(m.get("prior_ga", np.nan))
 
         if not np.isfinite(ph): ph = 1/3
         if not np.isfinite(pa): pa = 1/3
-        if not np.isfinite(pd_): pd_ = 1/3
-        # Jeśli brakuje priors dla goli, traktuj wszystkie rynki bramkowe neutralnie
-        goals_unknown = not (np.isfinite(gh) and np.isfinite(ga))
+        if not np.isfinite(pd): pd = 1/3
+        if not np.isfinite(gh): gh = 1.1
+        if not np.isfinite(ga): ga = 1.0
 
         win_margin = ph - pa
         p1 = self._sigmoid(win_margin)
         p2 = self._sigmoid(-win_margin)
 
-        p1x = max(p1, pd_ * 0.6) * 0.85
-        px2 = max(p2, pd_ * 0.6) * 0.85
-        p12 = max(1.0 - pd_, max(p1, p2) * 0.7) * 0.75
+        p1x = max(p1, pd * 0.6) * 0.85
+        px2 = max(p2, pd * 0.6) * 0.85
+        p12 = max(1.0 - pd, max(p1, p2) * 0.7) * 0.75
 
-        if goals_unknown:
-            p_btts_yes = p_btts_no = 0.5
-            p_over_2_5 = p_under_2_5 = 0.5
-            p_over_3_5 = p_under_3_5 = 0.5
-        else:
-            eg = max(0.0, gh) + max(0.0, ga)
-            p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
-            p_btts_no  = 1.0 - p_btts_yes
+        eg = max(0.0, gh) + max(0.0, ga)
+        p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
+        p_btts_no  = 1.0 - p_btts_yes
 
-            p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
-            p_under_2_5 = 1.0 - p_over_2_5
-            p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
-            p_under_3_5 = 1.0 - p_over_3_5
+        p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
+        p_under_2_5 = 1.0 - p_over_2_5
+        p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
+        p_under_3_5 = 1.0 - p_over_3_5
 
         priors = np.array([
             p1, p2, p1x, px2, p12,
@@ -656,35 +560,31 @@ class StadiumMatchEnv(Env):
                 md = None
         info["match_date"] = md
         info["n_features"] = int(self.X.shape[1]) if isinstance(self.X, np.ndarray) else None
-        info["global_streak"] = int(self._global_streak)
-        info["global_longest_streak"] = int(self._global_longest_streak)
         return info
 
     def _build_all_idxs(self):
-        # sortowanie deterministyczne: czas → (home, away, id)
-        valid = [i for i in range(len(self.X)) if not bool(self.skip_mask[i])]
-        valid.sort(key=self._sort_key)
-        self._all_idxs = valid
+        self._all_idxs = [i for i in range(len(self.X)) if not bool(self.skip_mask[i])]
 
     def _reset_coupon_pool(self):
         self._coupon_pool = list(self._all_idxs)
+        if len(self._coupon_pool) > 1:
+            self._np_random.shuffle(self._coupon_pool)
         self._coupon_pos = 0
+        self.used_match_ids.clear()
         self.coupon.clear()
         self.coupon_cost = 0.0
         self.bets_in_coupon = 0
         self.market_counts[:] = 0
         self.skipped.clear()
-        self._coupon_streak = 0
-        self._coupon_longest_streak = 0
-        self._coupon_taken_keys.clear()
 
     def _draw_next_from_coupon(self) -> bool:
         while self._coupon_pos < len(self._coupon_pool):
             idx = int(self._coupon_pool[self._coupon_pos])
             self._coupon_pos += 1
-            keys = self._match_keys(idx)
-            # duplikatów nie dopuszczamy tylko w obrębie bieżącego kuponu
-            if any(k in self._coupon_taken_keys for k in keys):
+            id_fp = None
+            if 0 <= idx < len(self.meta):
+                id_fp = self.meta[idx].get("id_fp")
+            if id_fp and id_fp in self.used_match_ids:
                 continue
             self.current_idx = idx
             return True
@@ -723,9 +623,9 @@ class StadiumMatchEnv(Env):
             btts,    # 5  BTTS Yes
             not btts,      # 6  BTTS No
             goals > 2.5,   # 7  Over 2.5
-            goals <= 2.5,  # 8  Under 2.5
+            goals <= 2.5,  # 8  Under 2.5 (≤2.5)
             goals > 3.5,   # 9  Over 3.5
-            goals <= 3.5,  # 10 Under 3.5
+            goals <= 3.5,  # 10 Under 3.5 (≤3.5)
         ][action]
 
     def reset(self, seed: int | None = None, options=None):
@@ -740,11 +640,6 @@ class StadiumMatchEnv(Env):
         self._last_close_info = {}
         self._last_coupon_total = 0
         self._last_coupon_correct = 0
-
-        # globalny streak resetujemy na budżet (run)
-        self._global_streak = 0
-        self._global_longest_streak = 0
-        self.used_match_ids.clear()
 
         self._build_all_idxs()
         self._reset_coupon_pool()
@@ -768,16 +663,21 @@ class StadiumMatchEnv(Env):
 
         r = self._close_coupon()
 
+        gained_reward = self.total_reward - before_reward
+        gained_max = self.total_max_points - before_max
+        gained_hits = self.global_correct - before_hits
+        gained_bets = self.global_bets - before_bets
+
         self.total_reward -= penalty
         r -= penalty
 
         self._last_close_info = {
             "coupon_closed": True,
             "emergency_close": True,
-            "coupon_reward": float(max(0.0, self.total_reward - before_reward)),
-            "coupon_max": float(self.total_max_points - before_max),
-            "coupon_hits": int(self.global_correct - before_hits),
-            "coupon_bets": int(self.global_bets - before_bets),
+            "coupon_reward": float(max(0.0, r)),
+            "coupon_max": float(gained_max),
+            "coupon_hits": int(gained_hits),
+            "coupon_bets": int(gained_bets),
             "penalty": float(penalty),
             "coupon_total": int(getattr(self, "_last_coupon_total", 0)),
             "coupon_correct": int(getattr(self, "_last_coupon_correct", 0)),
@@ -834,12 +734,8 @@ class StadiumMatchEnv(Env):
         idx = self.current_idx
         id_fp = self.meta[idx].get("id_fp", f"row{idx}")
 
-        # dodatkowy bezpiecznik – jeśli jednak trafił się duplikat id_fp w tym samym kuponie
-        # (duplikaty między kuponami są dozwolone)
-        # -> duplikat w obrębie kuponu traktujemy jak skip
-        keys_now = self._match_keys(idx)
-        if any(k in self._coupon_taken_keys for k in keys_now):
-            self._skip_match(idx, "duplicate_in_coupon", 0.0)
+        if id_fp in self.used_match_ids:
+            self._skip_match(idx, "duplicate_id_fp", 0.0)
             if not self._draw_next_from_coupon():
                 if self.bets_in_coupon >= self.min_bets_to_close and self.remaining_units >= self.coupon_price:
                     before_reward = self.total_reward
@@ -873,45 +769,8 @@ class StadiumMatchEnv(Env):
 
         priors = self._market_priors_for_idx(idx)
         prior_score = float(priors[market_act])
-
-        # kara za bardzo niski prior względem miękkiego progu
         if prior_score < self.prior_threshold_low:
             reward -= self.invalid_prior_penalty * (self.prior_threshold_low - prior_score + 1e-3)
-
-        # --- SELECTIVE PREDICTION (twardy próg): auto-skip jeśli prior poniżej progu
-        if skip_flag == 0 and prior_score < self.min_prior_for_bet:
-            # konwertujemy akcję na skip, delikatna kara za "wymuszone" odpuszczenie
-            delta_auto = -self.auto_skip_penalty_coef * (self.min_prior_for_bet - prior_score)
-            reward += delta_auto
-            self._skip_match(idx, "auto_skip_low_prior", delta_auto)
-            # przejdź do następnego meczu / logika zamknięcia
-            if not self._draw_next_from_coupon():
-                if self.bets_in_coupon >= self.min_bets_to_close and self.remaining_units >= self.coupon_price:
-                    before_reward = self.total_reward
-                    before_max = self.total_max_points
-                    before_hits = self.global_correct
-                    before_bets = self.global_bets
-                    reward += self._close_coupon()
-                    info.update({
-                        "coupon_closed": True,
-                        "emergency_close": False,
-                        "coupon_reward": float(self.total_reward - before_reward),
-                        "coupon_max": float(self.total_max_points - before_max),
-                        "coupon_hits": int(self.global_correct - before_hits),
-                        "coupon_bets": int(self.global_bets - before_bets),
-                        "coupon_total": int(getattr(self, "_last_coupon_total", 0)),
-                        "coupon_correct": int(getattr(self, "_last_coupon_correct", 0)),
-                        "perfect_coupon": bool(
-                            getattr(self, "_last_coupon_total", 0) > 0 and
-                            getattr(self, "_last_coupon_total", 0) == getattr(self, "_last_coupon_correct", 0)
-                        ),
-                    })
-                else:
-                    reward += self._emergency_close()
-                    info.update(self._last_close_info)
-                reward, info, terminated = self._after_coupon_closed(reward, info)
-            info = self._inject_common_info(info)
-            return self._get_observation(), reward, terminated, False, info
 
         if close_flag:
             if self.min_bets_to_close <= self.bets_in_coupon <= self.max_bets_to_close and self.remaining_units >= self.coupon_price:
@@ -985,54 +844,25 @@ class StadiumMatchEnv(Env):
             info = self._inject_common_info(info)
             return self._get_observation(), reward, terminated, False, info
 
-        # --- Dodawanie do kuponu + STREAK LOGIKA (kupon + global) ---
         if is_unknown:
             self.coupon.append((idx, market_act, None, weight, False))
-            for k in keys_now:
-                self._coupon_taken_keys.add(k)
             topk = set(np.argsort(priors)[-self.prior_topk:])
             if market_act in topk:
                 reward += self.prior_align_bonus_unknown * weight
         else:
             ok = bool(correct)
             self.coupon.append((idx, market_act, ok, weight, True))
-            for k in keys_now:
-                self._coupon_taken_keys.add(k)
-
-            # kuponowy streak
             if ok:
                 reward += self.step_hit_bonus * weight
-                self._coupon_streak += 1
-                self._coupon_longest_streak = max(self._coupon_longest_streak, self._coupon_streak)
-                reward += self.streak_step_bonus * self._coupon_streak
             else:
                 reward -= self.step_miss_pen / max(weight, 1e-6)
-                self._coupon_streak = 0
-
-            # globalny streak po dacie/godzinie
-            if ok:
-                self._global_streak += 1
-                self._global_longest_streak = max(self._global_longest_streak, self._global_streak)
-                reward += self.global_streak_step_bonus * self._global_streak
-            else:
-                self._global_streak = 0
-
             topk = set(np.argsort(priors)[-self.prior_topk:])
             if ok and (market_act in topk):
                 reward += self.prior_align_bonus_known * weight
 
         if id_fp:
             self.used_match_ids.add(id_fp)
-
-        prev_div = self._coupon_diversity()
         self.market_counts[market_act] += 1
-        new_div = self._coupon_diversity()
-        reward += self.diversity_step_bonus * max(0.0, new_div - prev_div)
-
-        ratio = float(self.market_counts[market_act]) / float(max(1, self.market_counts.sum()))
-        if ratio > self.max_same_market_ratio:
-            reward -= self.same_market_penalty * (ratio - self.max_same_market_ratio) * 10.0
-
         self.bets_in_coupon += 1
 
         if self.bets_in_coupon >= self.max_bets_to_close:
@@ -1106,12 +936,13 @@ class StadiumMatchEnv(Env):
         total_all = len(self.coupon)
         total_known = sum(1 for _, _, _, _, known in self.coupon if known)
         known_frac = (total_known / max(1, total_all))
-        # uczciwy koszt – min 1x price (jak wcześniej)
-        cost = self.coupon_price * max(1, known_frac)
+        # FIX: uczciwy koszt – min 50% ceny dla samych unknown
+        cost = self.coupon_price * max(1, known_frac)  # <-- POPRAWKA
         self.coupon_cost = cost
 
         base = match_bonus = wrong_pen = 0.0
         weighted_hits = weighted_bets = 0.0
+
         correct_known = 0
 
         for _, act, ok, w, known in self.coupon:
@@ -1133,11 +964,8 @@ class StadiumMatchEnv(Env):
         length_boost = (total_known >= 5) * (total_known ** 2)
         non_linear   = ((weighted_hits / total_known) ** 2) * total_known * 8 if total_known else 0.0
 
-        raw = (base + hit_bonus + match_bonus + \
+        raw = (base + hit_bonus + match_bonus +
                length_bonus + length_boost + non_linear - wrong_pen)
-
-        # premia za NAJDŁUŻSZĄ serię w kuponie
-        raw += self.streak_close_bonus * (self._coupon_longest_streak ** 2)
 
         if total_known > 0:
             if correct_known == total_known:
@@ -1149,7 +977,6 @@ class StadiumMatchEnv(Env):
 
         reward = max(0.0, raw)
 
-        # hipotetyczne max punkty (do skalowania day_score)
         if total_known > 0:
             perfect_raw = (total_known * self.base_per_correct + total_known**2 +
                            self.match_bonus_per_correct * total_known + total_known * 8 +
@@ -1167,14 +994,10 @@ class StadiumMatchEnv(Env):
         self._last_coupon_total = int(total_known)
         self._last_coupon_correct = int(correct_known)
 
-        if self.render_mode == "human":
-            self._render(cost, reward, correct_known, total_known, max_pts)
+        self._render(cost, reward, correct_known, total_known, max_pts)
 
         self.coupon.clear()
         self.bets_in_coupon = 0
-        self._coupon_streak = 0
-        self._coupon_longest_streak = 0
-        self._coupon_taken_keys.clear()  # NOWE: reset blokady tylko dla kolejnego kuponu
 
         return reward
 
@@ -1194,22 +1017,21 @@ class StadiumMatchEnv(Env):
             try: return str(int(x)) if x == int(x) else str(x)
             except (ValueError, TypeError): return "?"
 
-        def _fmt_datetime(raw_ts):
+        def _fmt_date(raw_ts):
             try:
                 if raw_ts is None: return None
                 ts = pd.to_datetime(raw_ts, errors="coerce")
                 if pd.notna(ts):
                     if getattr(ts, "tzinfo", None) is None:
                         ts = ts.tz_localize("UTC")
-                    return ts.tz_convert("Europe/Warsaw").strftime("%Y-%m-%d %H:%M")
+                    return ts.tz_convert("Europe/Warsaw").strftime("%Y-%m-%d")
             except Exception:
                 pass
             return None
 
         n_features = int(self.X.shape[1]) if isinstance(self.X, np.ndarray) else None
 
-        # POSORTUJ WYDRUK KUAPONU CHRONOLOGICZNIE Z TIE-BREAKEREM
-        for idx, act, ok, w, known in sorted(self.coupon, key=lambda t: self._sort_key(t[0])):
+        for idx, act, ok, w, known in self.coupon:
             if not (0 <= idx < len(self.y)): continue
             m = self.meta[idx]
             home = _safe(m.get("home_team"), "HOME")
@@ -1217,18 +1039,17 @@ class StadiumMatchEnv(Env):
             h, a = self.y[idx]
             icon = "🔵" if not known else ("🟢" if ok else "🔴")
             bet_display = bet_names[act] if 0 <= act < len(bet_names) else f"A{act}"
-            match_datetime = _fmt_datetime(m.get("start_time"))
+            match_date = _fmt_date(m.get("start_time"))
 
-            print(f"{icon} {home} vs {away} ({_fmt_goal(h)}-{_fmt_goal(a)}), "
-                  f"zakład: {bet_display}, OK: {ok if known else 'unknown'}, waga: {w:.2f}, "
-                  f"data i czas: {match_datetime}, cechy: {n_features}")
+            print(f"{icon} {home} vs {away} ({_fmt_goal(h)}-{_fmt_goal(a)}), " \
+                  f"zakład: {bet_display}, OK: {ok if known else 'unknown'}, waga: {w:.2f}, " \
+                  f"data: {match_date}, cechy: {n_features}")
 
         w_total = sum(w for _, _, _, w, known in self.coupon if known)
         w_hits  = sum(w for _, _, ok, w, known in self.coupon if known and ok)
         pct     = 100.0 * w_hits / w_total if w_total else 0.0
-        print(f"💰 Koszt kuponu: {cost:.2f}, Punkty: {reward:.0f}/{max_pts:.0f}  "
+        print(f"💰 Koszt kuponu: {cost:.2f}, Punkty: {reward:.0f}/{max_pts:.0f}  " \
               f"(trafione wagi: {w_hits:.2f}/{w_total:.2f}  ⇒  {pct:.1f}%)")
-        print(f"📏 Global streak (chron.): {self._global_streak} | Najdłuższy: {self._global_longest_streak}")
 
         if self.skipped:
             print("\n⏭ Skipowane mecze:")
@@ -1238,19 +1059,16 @@ class StadiumMatchEnv(Env):
                 m = self.meta[idx]
                 home = _safe(m.get("home_team"), "HOME")
                 away = _safe(m.get("away_team"), "AWAY")
-                match_datetime = _fmt_datetime(m.get("start_time"))
+                match_date = _fmt_date(m.get("start_time"))
                 efekt = "nagroda" if delta > 0 else ("kara" if delta < 0 else "neutral")
-                print(f"   - {home} vs {away} ({match_datetime}), powód: {reason}, {efekt}: {delta:+.2f}")
+                print(f"   - {home} vs {away} ({match_date}), powód: {reason}, {efekt}: {delta:+.2f}")
 
-    def render(self) -> None:
-        if self.render_mode != "human":
-            return
+    def render(self, mode="human"):
         total = self.market_counts.sum()
         hist = (self.market_counts / max(total, 1)).round(2)
-        print(f"📦 Kupon: {self.bets_in_coupon} betów | "
-              f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | "
-              f"Global hits: {self.global_correct}/{self.global_bets} | "
-              f"Global streak: {self._global_streak} (max {self._global_longest_streak})")
+        print(f"📦 Kupon: {self.bets_in_coupon} betów | " \
+              f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | " \
+              f"Global hits: {self.global_correct}/{self.global_bets}")
         print(f"📈 Histogram rynków: {hist.tolist()}")
         if self.skipped:
             print("⏭ Ostatnie skipy:")
@@ -1311,6 +1129,7 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
     except Exception as e:
         print(f"ℹ️ PPO.load nieudane (OK, próbuję ręcznie): {e}")
 
+    # B) ręczna analiza archiwum
     with zipfile.ZipFile(ckpt_path) as z:
         files = set(z.namelist())
         has_data_pkl  = "data.pkl" in files
@@ -1319,12 +1138,14 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
         has_params    = "parameters.pt" in files
         has_pt_vars   = "pytorch_variables.pth" in files
 
+        # Odczytaj wersję SB3 (informacyjnie)
         if "_stable_baselines3_version" in files:
             try:
                 print("ℹ️ Checkpoint trenowany na SB3=", z.read("_stable_baselines3_version").decode().strip())
             except Exception:
                 pass
 
+        # C) mamy meta → odczytaj z data/data.pkl
         meta = None
         if has_data_pkl or has_data_raw:
             try:
@@ -1335,7 +1156,7 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
 
         if meta is not None:
             policy_kwargs = dict(meta.get("policy_kwargs", {}))
-            policy_kwargs["ortho_init"] = False
+            policy_kwargs["ortho_init"] = False  # unikamy kosztownego QR
             model = PPO(
                 policy=meta.get("policy_class", "MlpPolicy"),
                 env=env,
@@ -1344,7 +1165,8 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
                 gamma=meta.get("gamma", 0.99),
                 device=device,
                 verbose=0,
-                )
+            )
+            # Wczytaj wagi
             try:
                 state = None
                 if has_policy:
@@ -1358,15 +1180,16 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
                 print(f"⚠️ Nie udało się wgrać wag policy: {e}")
 
             if has_pt_vars:
-                print("ℹ️ pytorch_variables.pth obecne (niepotrzebne do inferencji).")
+                print("ℹ️ W archiwum jest pytorch_variables.pth (stan optymalizera itp.). Do inferencji nie wymagane.")
             print("✅ Odtworzono model z meta ('data'/'data.pkl').")
             return model
 
+        # D) brak meta → weights-only (wymaga fallback_policy_kwargs)
         if not fallback_policy_kwargs:
             raise RuntimeError(
-                "Brak pliku 'data'/'data.pkl' i brak fallback_policy_kwargs. "
-                "Podaj POLICY_KWARGS z treningu."
-                )
+                "Brak pliku 'data'/'data.pkl' w checkpointcie i nie podano fallback_policy_kwargs. "
+                "Podaj POLICY_KWARGS z treningu, żebym mógł zrekonstruować architekturę."
+            )
 
         policy_kwargs = dict(fallback_policy_kwargs)
         policy_kwargs["ortho_init"] = False
@@ -1376,7 +1199,7 @@ def robust_load_sb3(ckpt_path: str, env, device: str, fallback_policy_kwargs: di
             policy_kwargs=policy_kwargs,
             device=device,
             verbose=0,
-            )
+        )
         if has_policy or has_params:
             try:
                 state = torch.load(io.BytesIO(z.read("policy.pth" if has_policy else "parameters.pt")),
@@ -1402,30 +1225,30 @@ def main() -> None:
     except Exception:
         pass
 
-    BASE_DIR       = "/content/drive/MyDrive/STADIONY_DANE/NAJLEPSZY_MODELE_RL"
-    BEST_MODEL_PATH = f"{BASE_DIR}/best_model.zip"
-    PREPROCESS_PATH = f"{BASE_DIR}/preprocess.pkl"
-    VECNORM_PATH    = f"{BASE_DIR}/vecnormalize.pkl"
-    LOG_DIR         = f"{BASE_DIR}/logs"
+    BEST_MODEL_PATH = "/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/best_model.zip"
+    PREPROCESS_PATH = "/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/preprocess.pkl"
+    VECNORM_PATH    = "/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/vecnormalize.pkl"
+    LOG_DIR         = "/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/content/drive/MyDrive/STADIONY_DANE/MODELE_RL/logs"
     os.makedirs(LOG_DIR, exist_ok=True)
 
     DAILY_LIMIT = 2_000
     N_STEPS_PER_DAY = 4096
     EVAL_RUNS_PER_DAY = 10
-    EVAL_DETERMINISTIC = False  # shadow-eval
 
+    # FIX: dynamiczne urządzenie
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GLOBAL_SEED = 42
     set_random_seed(GLOBAL_SEED)
 
+    # FIX: ortho_init=False (bez kosztownego QR)
     POLICY_KWARGS = dict(
-        net_arch=[8096, 4096, 2048, 1024, 512, 512, 256],
+        net_arch=[4096, 2048, 1024, 512, 512, 256],
         activation_fn=nn.SiLU,
-        ortho_init=False,
-        )
+        ortho_init=False,  # <-- POPRAWKA
+    )
 
     LEARNING_RATE = cosine_schedule(1e-4, 3e-5)
-    ENT_CONST = 0.1
+    ENT_CONST = 0.04
     TARGET_KL = 0.015
     CLIP_RANGE = 0.20
 
@@ -1443,7 +1266,6 @@ def main() -> None:
     best_hit_pct = -1.0
     model: PPO | None = None
 
-    # ——— PREPROCESSOR ———
     if os.path.exists(PREPROCESS_PATH):
         try:
             preprocess = joblib.load(PREPROCESS_PATH)
@@ -1458,7 +1280,6 @@ def main() -> None:
         joblib.dump(preprocess, PREPROCESS_PATH)
         print(f"🖴  Zapisano preprocesor → {PREPROCESS_PATH}")
 
-    # ——— OKNA WEEKENDOWE ———
     windows = build_weekend_windows(one_day_batches)
     if not windows:
         print("⚠️  Brak okna Fri+Sat / Sat+Sun – odpalam na wszystkich batchach.")
@@ -1473,7 +1294,6 @@ def main() -> None:
             info_lines.append(f"• {label}: {d0s} → {d1s} ({len(batches_ws)} batchy)")
         print("📅 Okna (Europe/Warsaw):\n  " + "\n  ".join(info_lines))
 
-    # ——— PĘTLA UCZENIA/EWALUACJI ———
     no_improve = 0
     for pass_idx in range(1, MAX_PASSES + 1):
         print(f"\n==================== PRZEBIEG #{pass_idx} (wszystkie okna) ====================")
@@ -1490,41 +1310,12 @@ def main() -> None:
                 if raw_df.empty:
                     print(f"📭 Dzień {day_idx}: pusty batch – pomijam")
                     continue
-
                 if len(raw_df) > DAILY_LIMIT:
                     raw_df = raw_df.sample(DAILY_LIMIT, random_state=GLOBAL_SEED + day_idx)
 
-                # Sortowanie chronologiczne (Europe/Warsaw) z deterministycznym tie-breakerem (zachowamy stabilność)
-                if "start_time" in raw_df.columns:
-                    try:
-                        st = pd.to_datetime(raw_df["start_time"], errors="coerce")
-                        if st.notna().any():
-                            st_local = st.dt.tz_localize(
-                                "UTC", nonexistent="shift_forward", ambiguous="NaT", errors="ignore"
-                            )
-                            st_local = st_local.dt.tz_convert("Europe/Warsaw")
-                            # podstawowy klucz czasu
-                            key_time = st_local.view("int64")
-                            # tie-breakery: home, away, id_fp
-                            home = raw_df.get("home_team", pd.Series([""]*len(raw_df))).astype(str).str.lower()
-                            away = raw_df.get("away_team", pd.Series([""]*len(raw_df))).astype(str).str.lower()
-                            idfp = raw_df.get("id_fp", pd.Series([""]*len(raw_df))).astype(str)
-                            ord_df = pd.DataFrame({
-                                "_t": key_time,
-                                "_h": home,
-                                "_a": away,
-                                "_i": idfp,
-                            })
-                            raw_df = raw_df.assign(_t=ord_df["_t"], _h=ord_df["_h"], _a=ord_df["_a"], _i=ord_df["_i"])
-                            raw_df = raw_df.sort_values(by=["_t","_h","_a","_i"], kind="mergesort")
-                            raw_df = raw_df.drop(columns=["_t","_h","_a","_i"])
-                    except Exception:
-                        pass
-
-                # Przygotowanie batcha
                 X_day, y_day, meta_day, preprocess, skip_mask = prepare_batch(
                     raw_df, preprocess, fit_if_none=False, save_path=None
-                )
+                    )
                 if preprocess is None:
                     print(f"⚠️  Dzień {day_idx}: Preprocesor nie gotowy – pomijam.")
                     continue
@@ -1535,18 +1326,12 @@ def main() -> None:
                 def make_thunk(X=X_day, Y=y_day, M=meta_day, SK=skip_mask,
                                seed=GLOBAL_SEED + day_idx, mn=mn, mx=mx):
                     def _thunk():
-                        base_env = StadiumMatchEnv(
-                            X, Y, M,
-                            total_units=20.0,
-                            coupon_price=2.0,
-                            min_bets_to_close=mn,
-                            max_bets_to_close=mx,
-                            skip_mask=SK,
-                            seed=seed,
-                            # Obniżony próg selekcji, by model mógł wybierać więcej rynków
-                            min_prior_for_bet=0.55,
-                            auto_skip_penalty_coef=0.2,    # delikatna kara za auto-skip
-                        )
+                        base_env = StadiumMatchEnv(X, Y, M, total_units=20.0,
+                                                   coupon_price=2.0,
+                                                   min_bets_to_close=mn,
+                                                   max_bets_to_close=mx,
+                                                   skip_mask=SK,
+                                                   seed=seed)
                         return ImputeNaNWrapper(base_env, impute_value=0.0)
                     return _thunk
 
@@ -1559,18 +1344,17 @@ def main() -> None:
                         print("📥 Załadowano VecNormalize.")
                     except Exception as e:
                         print(f"⚠️  Błąd load VecNormalize: {e} — inicjalizuję nowe statystyki.")
-                        vecnorm = VecNormalize(
-                            vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0, gamma=0.995
-                        )
+                        vecnorm = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
+                                               clip_obs=10.0, clip_reward=10.0, gamma=0.995)
                 else:
-                    vecnorm = VecNormalize(
-                        vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0, gamma=0.995
-                    )
+                    vecnorm = VecNormalize(vec_env, norm_obs=True, norm_reward=True,
+                                           clip_obs=10.0, clip_reward=10.0, gamma=0.995)
 
-                # Model
+                # --- MODEL ---
                 if model is None:
                     if os.path.exists(BEST_MODEL_PATH):
                         model = robust_load_sb3(BEST_MODEL_PATH, vecnorm, DEVICE, POLICY_KWARGS)
+
                     else:
                         print("✨ Inicjalizacja nowego modelu…")
                         model = PPO(
@@ -1593,27 +1377,26 @@ def main() -> None:
                 else:
                     model.set_env(vecnorm)
 
-                # Trening
+                # TRENING
                 print(f"\n🚀 Dzień {day_idx}: trening na {len(X_day)} przykładach…")
                 try:
                     vecnorm.training = True
                     vecnorm.norm_reward = True
                     model.learn(total_timesteps=N_STEPS_PER_DAY, reset_num_timesteps=False, progress_bar=False)
                     vecnorm.training = False
-                    vecnorm.norm_reward = False  # ewaluacja bez normowania nagród
+                    vecnorm.norm_reward = False  # FIX: eval bez normowania nagród
                     vecnorm.save(VECNORM_PATH)
                 except Exception as e:
                     print(f"❌ Błąd treningu w dniu {day_idx}: {e}")
                     continue
 
-                # Ewaluacja (shadow-eval)
+                # --- EWALUACJA – z infos (PO TRAININGU) ---
                 pts_sum = 0.0
                 max_sum = 0.0
                 hits_sum = 0
                 bets_sum = 0
 
-                print(f"🔬 Dzień {day_idx}: ewaluacja ({EVAL_RUNS_PER_DAY} budżetów, "
-                      f"{'deterministic' if EVAL_DETERMINISTIC else 'stochastic'})…")
+                print(f"🔬 Dzień {day_idx}: ewaluacja ({EVAL_RUNS_PER_DAY} budżetów, deterministic)…")
                 perfect_runs_flags: List[bool] = []
                 budget_stats: List[Tuple[int, bool]] = []
 
@@ -1622,11 +1405,11 @@ def main() -> None:
                     coupons_closed_this_run = 0
                     try:
                         vecnorm.training = False
-                        vecnorm.norm_reward = False
+                        vecnorm.norm_reward = False  # FIX: pewność, że bez normowania
                         obs = vecnorm.reset()
                         done = np.array([False])
                         while not bool(done[0]):
-                            action, _ = model.predict(obs, deterministic=EVAL_DETERMINISTIC)
+                            action, _ = model.predict(obs, deterministic=True)
                             obs, rwd, done, infos = vecnorm.step(action)
                             info = infos[0] if isinstance(infos, list) else infos
                             if info and info.get("coupon_closed"):
@@ -1654,7 +1437,6 @@ def main() -> None:
                 print(f"✅ Skuteczność: {day_score:.1f}% | Trafienia: {hits_sum}/{bets_sum} ⇒ {hit_pct:.1f}% "
                       f"| Budżety z perfect: {runs_perfect}/{EVAL_RUNS_PER_DAY}")
 
-                # Log CSV
                 day_date = _infer_local_date(raw_df)
                 date_tag = day_date.strftime("%Y%m%d") if day_date is not None else f"idx{day_idx:03d}"
                 df_log = pd.DataFrame({
@@ -1673,7 +1455,6 @@ def main() -> None:
                 df_log.to_csv(csv_path, index=False)
                 print(f"📝 Zapisano log budżetów do: {csv_path}")
 
-                # Update best & zapis modelu
                 if day_score > best_score or hit_pct > best_hit_pct:
                     best_score = max(best_score, day_score)
                     best_hit_pct = max(best_hit_pct, hit_pct)
@@ -1683,7 +1464,6 @@ def main() -> None:
 
                 pass_all_days_all_runs_perfect = pass_all_days_all_runs_perfect and all_runs_perfect
 
-        # Kryteria stopu
         if pass_all_days_all_runs_perfect:
             print(f"\n✅ Kryterium spełnione: w KAŻDYM budżecie pojawił się co najmniej jeden kupon 100%. Kończę.")
             break
