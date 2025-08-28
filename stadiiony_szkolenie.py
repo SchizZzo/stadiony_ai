@@ -1519,7 +1519,8 @@ def main() -> None:
                             max_bets_to_close=mx,
                             skip_mask=SK,
                             seed=seed,
-                            min_prior_for_bet=0.65,        # próg selekcji (możesz stroić 0.6–0.8)
+                            # Obniżony próg selekcji, by model mógł wybierać więcej rynków
+                            min_prior_for_bet=0.55,
                             auto_skip_penalty_coef=0.2,    # delikatna kara za auto-skip
                         )
                         return ImputeNaNWrapper(base_env, impute_value=0.0)
