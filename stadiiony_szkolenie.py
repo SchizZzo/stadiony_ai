@@ -391,9 +391,10 @@ class StadiumMatchEnv(Env):
         self.wrong_penalty = 12.0
         self.wide_weights = {
             2: 0.60, 3: 0.60, 4: 0.50,
-            10: 0.90,
-            7: 1.05, 9: 1.05,
-            5: 1.05, 6: 1.05,
+            8: 0.90,
+            10: 0.85,
+            5: 0.95,
+            7: 1.05, 9: 1.05, 6: 1.05,
         }
         self.length_bonus_per_bet = 1.0
         self.step_hit_bonus = 0.6
@@ -407,7 +408,11 @@ class StadiumMatchEnv(Env):
         self.diversity_step_bonus  = 0.2
         self.diversity_close_bonus = 0.5
         self.monotony_hard_penalty = 0.0
-        self.market_specific_penalty = {10: 0.06}
+        self.market_specific_penalty = {
+            10: 0.06,  # Under 3.5
+            8: 0.08,   # Under 2.5
+            5: 0.05,   # BTTS Yes
+        }
 
         self.prior_threshold_low = 0.18
         self.invalid_prior_penalty = 0.5
