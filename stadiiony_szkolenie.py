@@ -591,8 +591,8 @@ class StadiumMatchEnv(Env):
         if not np.isfinite(ph): ph = 1/3
         if not np.isfinite(pa): pa = 1/3
         if not np.isfinite(pd_): pd_ = 1/3
-        if not np.isfinite(gh): gh = 1.1
-        if not np.isfinite(ga): ga = 1.0
+        # Jeśli brakuje priors dla goli, traktuj wszystkie rynki bramkowe neutralnie
+        goals_unknown = not (np.isfinite(gh) and np.isfinite(ga))
 
         win_margin = ph - pa
         p1 = self._sigmoid(win_margin)
@@ -602,14 +602,19 @@ class StadiumMatchEnv(Env):
         px2 = max(p2, pd_ * 0.6) * 0.85
         p12 = max(1.0 - pd_, max(p1, p2) * 0.7) * 0.75
 
-        eg = max(0.0, gh) + max(0.0, ga)
-        p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
-        p_btts_no  = 1.0 - p_btts_yes
+        if goals_unknown:
+            p_btts_yes = p_btts_no = 0.5
+            p_over_2_5 = p_under_2_5 = 0.5
+            p_over_3_5 = p_under_3_5 = 0.5
+        else:
+            eg = max(0.0, gh) + max(0.0, ga)
+            p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
+            p_btts_no  = 1.0 - p_btts_yes
 
-        p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
-        p_under_2_5 = 1.0 - p_over_2_5
-        p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
-        p_under_3_5 = 1.0 - p_over_3_5
+            p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
+            p_under_2_5 = 1.0 - p_over_2_5
+            p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
+            p_under_3_5 = 1.0 - p_over_3_5
 
         priors = np.array([
             p1, p2, p1x, px2, p12,
