@@ -391,11 +391,6 @@ class StadiumMatchEnv(Env):
         self.wrong_penalty = 12.0
         self.wide_weights = {
             2: 0.60, 3: 0.60, 4: 0.50,
-            # Mocniejsze obniżenie wag dla rynków, które były faworyzowane
-            8: 0.40,   # Under 2.5
-            10: 0.35,  # Under 3.5
-            5: 0.45,   # BTTS Yes
-            7: 1.05, 9: 1.05, 6: 1.05,
         }
         self.length_bonus_per_bet = 1.0
         self.step_hit_bonus = 0.6
@@ -411,12 +406,8 @@ class StadiumMatchEnv(Env):
         self.diversity_close_bonus = 0.5
         self.monotony_hard_penalty = 0.0
         # Dodatkowe kary dla często wybieranych rynków, aby model ich nie preferował
-        # Mocniejsze kary dla rynków, które dotychczas były wybierane najczęściej
-        self.market_specific_penalty = {
-            10: 0.40,  # Under 3.5
-            8: 0.50,   # Under 2.5
-            5: 0.40,   # BTTS Yes
-        }
+        # Usunięto preferencyjne kary dla wybranych rynków, by agent miał swobodę wyboru
+        self.market_specific_penalty = {}
 
         self.prior_threshold_low = 0.18
         self.invalid_prior_penalty = 0.5
