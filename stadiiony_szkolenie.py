@@ -391,11 +391,6 @@ class StadiumMatchEnv(Env):
         self.wrong_penalty = 12.0
         self.wide_weights = {
             2: 0.60, 3: 0.60, 4: 0.50,
-            # Mocniejsze obniżenie wag dla rynków, które były faworyzowane
-            8: 0.40,   # Under 2.5
-            10: 0.35,  # Under 3.5
-            5: 0.45,   # BTTS Yes
-            7: 1.05, 9: 1.05, 6: 1.05,
         }
         self.length_bonus_per_bet = 1.0
         self.step_hit_bonus = 0.6
@@ -411,12 +406,8 @@ class StadiumMatchEnv(Env):
         self.diversity_close_bonus = 0.5
         self.monotony_hard_penalty = 0.0
         # Dodatkowe kary dla często wybieranych rynków, aby model ich nie preferował
-        # Mocniejsze kary dla rynków, które dotychczas były wybierane najczęściej
-        self.market_specific_penalty = {
-            10: 0.40,  # Under 3.5
-            8: 0.50,   # Under 2.5
-            5: 0.40,   # BTTS Yes
-        }
+        # Usunięto preferencyjne kary dla wybranych rynków, by agent miał swobodę wyboru
+        self.market_specific_penalty = {}
 
         self.prior_threshold_low = 0.18
         self.invalid_prior_penalty = 0.5
@@ -600,8 +591,8 @@ class StadiumMatchEnv(Env):
         if not np.isfinite(ph): ph = 1/3
         if not np.isfinite(pa): pa = 1/3
         if not np.isfinite(pd_): pd_ = 1/3
-        if not np.isfinite(gh): gh = 1.1
-        if not np.isfinite(ga): ga = 1.0
+        # Jeśli brakuje priors dla goli, traktuj wszystkie rynki bramkowe neutralnie
+        goals_unknown = not (np.isfinite(gh) and np.isfinite(ga))
 
         win_margin = ph - pa
         p1 = self._sigmoid(win_margin)
@@ -611,14 +602,19 @@ class StadiumMatchEnv(Env):
         px2 = max(p2, pd_ * 0.6) * 0.85
         p12 = max(1.0 - pd_, max(p1, p2) * 0.7) * 0.75
 
-        eg = max(0.0, gh) + max(0.0, ga)
-        p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
-        p_btts_no  = 1.0 - p_btts_yes
+        if goals_unknown:
+            p_btts_yes = p_btts_no = 0.5
+            p_over_2_5 = p_under_2_5 = 0.5
+            p_over_3_5 = p_under_3_5 = 0.5
+        else:
+            eg = max(0.0, gh) + max(0.0, ga)
+            p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
+            p_btts_no  = 1.0 - p_btts_yes
 
-        p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
-        p_under_2_5 = 1.0 - p_over_2_5
-        p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
-        p_under_3_5 = 1.0 - p_over_3_5
+            p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
+            p_under_2_5 = 1.0 - p_over_2_5
+            p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
+            p_under_3_5 = 1.0 - p_over_3_5
 
         priors = np.array([
             p1, p2, p1x, px2, p12,
