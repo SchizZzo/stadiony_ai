@@ -408,7 +408,6 @@ class StadiumMatchEnv(Env):
         self.monotony_hard_penalty = 0.0
         self.market_specific_penalty = {10: 0.06}
 
-        self.prior_topk = 2
         self.prior_threshold_low = 0.18
         self.invalid_prior_penalty = 0.5
         self.prior_align_bonus_known = 0.25
@@ -463,6 +462,9 @@ class StadiumMatchEnv(Env):
         n_features = X.shape[1]
         self.hist_dim = self.num_markets
         self.prior_dim = self.num_markets
+        # Previously only top few markets (3) from priors were used during training.
+        # Use priors for all available markets to encourage broader market selection.
+        self.prior_topk = self.num_markets
 
         obs_low  = np.concatenate([
             np.full(n_features, -1e9, dtype=np.float32),
