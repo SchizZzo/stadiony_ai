@@ -1,6 +1,3 @@
-#4
-
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -13,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Union
 
+import math
 import numpy as np
 import pandas as pd
 
@@ -503,6 +501,46 @@ class StadiumMatchEnv(Env):
     def _sigmoid(x: float, k: float = 4.0) -> float:
         return float(1.0 / (1.0 + np.exp(-k * x)))
 
+    @staticmethod
+    def _poisson_market_probs(gh: float, ga: float, limit: int = 10) -> tuple[float, float, float, float, float, float]:
+        """Approximate market probabilities via independent Poisson models.
+
+        gh and ga denote expected goals for the home and away team.  The
+        calculation is truncated at ``limit`` goals and the remaining mass is
+        folded into the last bucket to ensure probabilities sum to one.
+        Returns (p_home, p_draw, p_away, p_btts_yes, p_over_2_5, p_over_3_5).
+        """
+        gh = max(0.0, float(gh))
+        ga = max(0.0, float(ga))
+
+        def poi(lam: float, k: int) -> float:
+            return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+        probs_h = [poi(gh, i) for i in range(limit)]
+        probs_h.append(max(0.0, 1.0 - sum(probs_h)))
+        probs_a = [poi(ga, i) for i in range(limit)]
+        probs_a.append(max(0.0, 1.0 - sum(probs_a)))
+
+        p_home = p_draw = p_away = 0.0
+        p_btts_yes = p_over_2_5 = p_over_3_5 = 0.0
+        for h, ph in enumerate(probs_h):
+            for a, pa in enumerate(probs_a):
+                p = ph * pa
+                if h > a:
+                    p_home += p
+                elif h < a:
+                    p_away += p
+                else:
+                    p_draw += p
+                if h > 0 and a > 0:
+                    p_btts_yes += p
+                if h + a > 2:
+                    p_over_2_5 += p
+                if h + a > 3:
+                    p_over_3_5 += p
+
+        return p_home, p_draw, p_away, p_btts_yes, p_over_2_5, p_over_3_5
+
     def _market_priors_for_idx(self, idx: int) -> np.ndarray:
         if not (0 <= idx < len(self.meta)):
             return np.zeros(self.num_markets, dtype=np.float32)
@@ -513,27 +551,32 @@ class StadiumMatchEnv(Env):
         gh = float(m.get("prior_gh", np.nan))
         ga = float(m.get("prior_ga", np.nan))
 
-        if not np.isfinite(ph): ph = 1/3
-        if not np.isfinite(pa): pa = 1/3
-        if not np.isfinite(pd): pd = 1/3
-        if not np.isfinite(gh): gh = 1.1
-        if not np.isfinite(ga): ga = 1.0
+        # Compute base probabilities using Poisson model when expected goals
+        # are known.  If explicit probabilities for 1/X/2 are provided in the
+        # metadata, normalise and use them instead for those markets.
+        if np.isfinite(gh) and np.isfinite(ga):
+            p_home, p_draw, p_away, p_btts_yes, p_over_2_5, p_over_3_5 = self._poisson_market_probs(gh, ga)
+        else:
+            gh = 1.1 if not np.isfinite(gh) else gh
+            ga = 1.0 if not np.isfinite(ga) else ga
+            p_home = p_away = p_draw = 1/3
+            p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
+            p_over_2_5 = self._sigmoid(gh + ga - 2.5, k=2.5)
+            p_over_3_5 = self._sigmoid(gh + ga - 3.5, k=2.5)
 
-        win_margin = ph - pa
-        p1 = self._sigmoid(win_margin)
-        p2 = self._sigmoid(-win_margin)
+        if np.isfinite(ph) and np.isfinite(pa) and np.isfinite(pd):
+            total = ph + pa + pd
+            if total > 0:
+                p_home, p_away, p_draw = ph / total, pa / total, pd / total
 
-        p1x = max(p1, pd * 0.6) * 0.85
-        px2 = max(p2, pd * 0.6) * 0.85
-        p12 = max(1.0 - pd, max(p1, p2) * 0.7) * 0.75
+        p1 = p_home
+        p2 = p_away
+        p1x = p_home + p_draw
+        px2 = p_away + p_draw
+        p12 = p_home + p_away
 
-        eg = max(0.0, gh) + max(0.0, ga)
-        p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
-        p_btts_no  = 1.0 - p_btts_yes
-
-        p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
+        p_btts_no = 1.0 - p_btts_yes
         p_under_2_5 = 1.0 - p_over_2_5
-        p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
         p_under_3_5 = 1.0 - p_over_3_5
 
         priors = np.array([
