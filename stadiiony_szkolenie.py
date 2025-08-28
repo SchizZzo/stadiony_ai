@@ -377,7 +377,7 @@ class StadiumMatchEnv(Env):
     """
     Akcja = (market_act, skip_flag, close_flag)
     """
-    metadata = {"render.modes": ["human"]}
+    metadata = {"render_modes": ["human"]}
 
     def __init__(
         self,
@@ -394,9 +394,11 @@ class StadiumMatchEnv(Env):
         auto_skip_penalty_coef: float = 0.2,  # NEW: delikatna kara za wymuszone auto-skipy
         prior_topk: int | None = None,
         seed: int = 42,
+        render_mode: str | None = None,
     ):
         super().__init__()
         self.X, self.y, self.meta = X, y, meta
+        self.render_mode = render_mode
 
         # ---- Nagrody / balans – pro-accuracy ----
         self.base_per_correct = 10.0
@@ -1165,7 +1167,8 @@ class StadiumMatchEnv(Env):
         self._last_coupon_total = int(total_known)
         self._last_coupon_correct = int(correct_known)
 
-        self._render(cost, reward, correct_known, total_known, max_pts)
+        if self.render_mode == "human":
+            self._render(cost, reward, correct_known, total_known, max_pts)
 
         self.coupon.clear()
         self.bets_in_coupon = 0
@@ -1239,7 +1242,9 @@ class StadiumMatchEnv(Env):
                 efekt = "nagroda" if delta > 0 else ("kara" if delta < 0 else "neutral")
                 print(f"   - {home} vs {away} ({match_datetime}), powód: {reason}, {efekt}: {delta:+.2f}")
 
-    def render(self, mode="human"):
+    def render(self) -> None:
+        if self.render_mode != "human":
+            return
         total = self.market_counts.sum()
         hist = (self.market_counts / max(total, 1)).round(2)
         print(f"📦 Kupon: {self.bets_in_coupon} betów | "
