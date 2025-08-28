@@ -404,16 +404,18 @@ class StadiumMatchEnv(Env):
         self.skip_good_bonus   = 0.8
         self.skip_bad_penalty  = 0.6
 
-        self.max_same_market_ratio = 0.55
-        self.same_market_penalty   = 0.4
+        # Dodatkowe ograniczenie dominacji pojedynczych rynków
+        self.max_same_market_ratio = 0.30
+        self.same_market_penalty   = 0.8
         self.diversity_step_bonus  = 0.2
         self.diversity_close_bonus = 0.5
         self.monotony_hard_penalty = 0.0
         # Dodatkowe kary dla często wybieranych rynków, aby model ich nie preferował
+        # Mocniejsze kary dla rynków, które dotychczas były wybierane najczęściej
         self.market_specific_penalty = {
-            10: 0.15,  # Under 3.5
-            8: 0.20,   # Under 2.5
-            5: 0.15,   # BTTS Yes
+            10: 0.40,  # Under 3.5
+            8: 0.50,   # Under 2.5
+            5: 0.40,   # BTTS Yes
         }
 
         self.prior_threshold_low = 0.18
