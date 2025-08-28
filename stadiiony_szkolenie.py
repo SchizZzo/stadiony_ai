@@ -121,10 +121,24 @@ def _ohe_compatible(**kwargs):
         return OneHotEncoder(handle_unknown="ignore", sparse=False, **kwargs)
 
 def _numeric_coerce(df: pd.DataFrame, meta_cols: set[str]) -> pd.DataFrame:
+    """Convert non-meta object columns to numeric.
+
+    The previous implementation iterated over every column individually,
+    incurring Python-level overhead.  Here we operate on all applicable
+    columns in a single vectorised block which relies on pandas'
+    optimised routines.  This makes the coercion noticeably faster on
+    wide dataframes.
+    """
+
     df = df.copy()
-    for col in df.columns:
-        if df[col].dtype == "object" and col not in meta_cols:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace("%", "", regex=False), errors="coerce")
+    object_cols = [c for c in df.select_dtypes(include="object").columns
+                   if c not in meta_cols]
+    if object_cols:
+        df[object_cols] = (
+            df[object_cols]
+            .replace("%", "", regex=True)
+            .apply(pd.to_numeric, errors="coerce")
+        )
     return df
 
 def build_preprocessor(df_feat: pd.DataFrame) -> Pipeline:
