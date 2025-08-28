@@ -378,6 +378,7 @@ class StadiumMatchEnv(Env):
         skip_mask: Optional[np.ndarray] = None,
         min_prior_for_bet: float = 0.65,   # NEW: twardy próg selekcji (selective prediction)
         auto_skip_penalty_coef: float = 0.2,  # NEW: delikatna kara za wymuszone auto-skipy
+        prior_topk: int | None = None,
         seed: int = 42,
     ):
         super().__init__()
@@ -462,9 +463,11 @@ class StadiumMatchEnv(Env):
         n_features = X.shape[1]
         self.hist_dim = self.num_markets
         self.prior_dim = self.num_markets
-        # Previously only top few markets (3) from priors were used during training.
-        # Use priors for all available markets to encourage broader market selection.
-        self.prior_topk = self.num_markets
+        # Default to considering all markets in prior-based incentives unless
+        # a specific limit is provided.
+        self.prior_topk = (
+            self.num_markets if prior_topk is None else min(int(prior_topk), self.num_markets)
+        )
 
         obs_low  = np.concatenate([
             np.full(n_features, -1e9, dtype=np.float32),
