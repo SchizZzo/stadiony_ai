@@ -3,7 +3,7 @@
 """
 RL pipeline – V3.9+
 (two-stage flavor: market + risk mode)
-(no-skip-on-unknown + priors + fair-cost + streak bonus + time-sorted + global streak
+(no-skip-on-unknown + priors + fair-cost + progressive streak bonus + time-sorted + global streak
  + allow-duplicates-across-coupons + selective-threshold + policy-margin gate + curriculum gates + day-context)
 
 Zmiany vs V3.9:
@@ -12,6 +12,7 @@ Zmiany vs V3.9:
  • Różnicowanie nagród wg trybu (większa nagroda i kara dla „pewniaka”)
  • Curriculum: łagodniejsze progi i łagodniejsze zaostrzanie progów w kolejnych przebiegach
  • Delikatny aux-consistency bonus ze zgodnością z priors bramkowymi
+ • Progresywny bonus za serię trafień (kupon + global)
  • NOWE: „wstępny skan dnia” – globalny kontekst z priors całego dnia dołączony do obserwacji (stały wektor)
  • Fix: bezpieczne tworzenie katalogów (exist_ok=True), pewne tworzenie katalogu logów
 """
@@ -455,11 +456,11 @@ class StadiumMatchEnv(Env):
         self.prior_align_bonus_known = 0.25
         self.prior_align_bonus_unknown = 0.35
 
-        # Streak bonuses (kupon)
+        # Streak bonuses (kupon – progresywny)
         self.streak_step_bonus  = 0.30
         self.streak_close_bonus = 0.80
 
-        # Globalny streak (po czasie)
+        # Globalny streak (po czasie – progresywny)
         self.global_streak_step_bonus = 0.25
         self._global_streak: int = 0
         self._global_longest_streak: int = 0
@@ -1095,7 +1096,8 @@ class StadiumMatchEnv(Env):
                 reward += self.step_hit_bonus * weight * self.mode_hit_boost[risk_flag]
                 self._coupon_streak += 1
                 self._coupon_longest_streak = max(self._coupon_longest_streak, self._coupon_streak)
-                reward += self.streak_step_bonus * self._coupon_streak
+                # progressive (quadratic) bonus for growing streak within coupon
+                reward += self.streak_step_bonus * (self._coupon_streak ** 2)
             else:
                 reward -= (self.step_miss_pen / max(weight, 1e-6)) * self.mode_miss_boost[risk_flag]
                 self._coupon_streak = 0
@@ -1103,7 +1105,8 @@ class StadiumMatchEnv(Env):
             if ok:
                 self._global_streak += 1
                 self._global_longest_streak = max(self._global_longest_streak, self._global_streak)
-                reward += self.global_streak_step_bonus * self._global_streak
+                # progressive (quadratic) bonus for global streak across coupons
+                reward += self.global_streak_step_bonus * (self._global_streak ** 2)
             else:
                 self._global_streak = 0
 
