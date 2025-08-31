@@ -504,6 +504,7 @@ class StadiumMatchEnv(Env):
 
         self._coupon_streak: int = 0
         self._coupon_longest_streak: int = 0
+        self._coupon_series_active: bool = True
 
         if skip_mask is None:
             self.skip_mask = np.zeros(len(X), dtype=bool)
@@ -728,6 +729,7 @@ class StadiumMatchEnv(Env):
         self.skipped.clear()
         self._coupon_streak = 0
         self._coupon_longest_streak = 0
+        self._coupon_series_active = True
         self._coupon_taken_keys.clear()
 
     def _draw_next_from_coupon(self) -> bool:
@@ -1094,13 +1096,15 @@ class StadiumMatchEnv(Env):
 
             if ok:
                 reward += self.step_hit_bonus * weight * self.mode_hit_boost[risk_flag]
-                self._coupon_streak += 1
-                self._coupon_longest_streak = max(self._coupon_longest_streak, self._coupon_streak)
-                # progressive (quadratic) bonus for growing streak within coupon
-                reward += self.streak_step_bonus * (self._coupon_streak ** 2)
+                if self._coupon_series_active:
+                    self._coupon_streak += 1
+                    self._coupon_longest_streak = max(self._coupon_longest_streak, self._coupon_streak)
+                    # progressive (quadratic) bonus for growing streak within coupon
+                    reward += self.streak_step_bonus * (self._coupon_streak ** 2)
             else:
                 reward -= (self.step_miss_pen / max(weight, 1e-6)) * self.mode_miss_boost[risk_flag]
-                self._coupon_streak = 0
+                if self._coupon_series_active:
+                    self._coupon_series_active = False
 
             if ok:
                 self._global_streak += 1
@@ -1280,6 +1284,7 @@ class StadiumMatchEnv(Env):
         self.bets_in_coupon = 0
         self._coupon_streak = 0
         self._coupon_longest_streak = 0
+        self._coupon_series_active = True
         self._coupon_taken_keys.clear()
 
         return reward
@@ -1334,7 +1339,8 @@ class StadiumMatchEnv(Env):
         pct     = 100.0 * w_hits / w_total if w_total else 0.0
         print(f"💰 Koszt kuponu: {cost:.2f}, Punkty: {reward:.0f}/{max_pts:.0f}  "
               f"(trafione wagi: {w_hits:.2f}/{w_total:.2f}  ⇒  {pct:.1f}%)")
-        print(f"📏 Global streak (chron.): {self._global_streak} | Najdłuższy: {self._global_longest_streak}")
+        print(f"📏 Seria kuponu: {self._coupon_streak} | Global: {self._global_streak} "
+              f"(max {self._global_longest_streak})")
 
         if self.skipped:
             print("\n⏭ Skipowane mecze:")
@@ -1351,7 +1357,7 @@ class StadiumMatchEnv(Env):
     def render(self, mode="human"):
         total = self.market_counts.sum()
         hist = (self.market_counts / max(total, 1)).round(2)
-        print(f"📦 Kupon: {self.bets_in_coupon} betów | "
+        print(f"📦 Kupon: {self.bets_in_coupon} betów | Seria: {self._coupon_streak} | "
               f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | "
               f"Global hits: {self.global_correct}/{self.global_bets} | "
               f"Global streak: {self._global_streak} (max {self._global_longest_streak})")
