@@ -3,7 +3,7 @@
 """
 RL pipeline – V3.9+
 (two-stage flavor: market + risk mode)
-(no-skip-on-unknown + priors + fair-cost + progressive streak bonus + confidence-sorted + global streak
+(no-skip-on-unknown + priors + fair-cost + progressive streak bonus + time-sorted + global streak
  + allow-duplicates-across-coupons + selective-threshold + policy-margin gate + curriculum gates + day-context)
 
 Zmiany vs V3.9:
@@ -20,7 +20,7 @@ Zmiany vs V3.9:
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Union, Sequence
+from typing import Any, Dict, List, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -32,7 +32,6 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.base_class import BaseAlgorithm
 
 import re
 from sklearn.compose import ColumnTransformer
@@ -47,13 +46,6 @@ import joblib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from datetime import datetime
-from match_selector import (
-    MatchPrediction,
-    predictions_from_rl,
-    longest_confident_series,
-)
 
 # --- DODATKOWE IMPORTY DLA ROBUST LOADERA ---
 import zipfile, io
@@ -512,7 +504,7 @@ class StadiumMatchEnv(Env):
 
         self._coupon_streak: int = 0
         self._coupon_longest_streak: int = 0
-        self._coupon_missed: bool = False
+        self._coupon_series_active: bool = True
 
         if skip_mask is None:
             self.skip_mask = np.zeros(len(X), dtype=bool)
@@ -607,16 +599,7 @@ class StadiumMatchEnv(Env):
         return keys
 
     def _sort_key(self, idx: int) -> tuple:
-        """Sort by highest prior probability (pewniak) then by time."""
         m = self.meta[idx] if 0 <= idx < len(self.meta) else {}
-        ph = float(m.get("prior_ph", np.nan))
-        pa = float(m.get("prior_pa", np.nan))
-        pd_ = float(m.get("prior_pd", np.nan))
-        ph = ph if np.isfinite(ph) else 0.0
-        pa = pa if np.isfinite(pa) else 0.0
-        pd_ = pd_ if np.isfinite(pd_) else 0.0
-        conf = max(ph, pa, pd_)
-
         try:
             raw = m.get("start_time", None)
             ts = pd.to_datetime(raw, errors="coerce")
@@ -631,7 +614,7 @@ class StadiumMatchEnv(Env):
         home = str(m.get("home_team", "")).strip().lower()
         away = str(m.get("away_team", "")).strip().lower()
         idn = self._norm_id(m.get("id_fp")) or f"row{idx}"
-        return (-conf, ts_val, home, away, idn)
+        return (ts_val, home, away, idn)
 
     def set_policy_metrics(self, pct: Optional[float] = None,
                            margin_pp: Optional[float] = None,
@@ -746,7 +729,7 @@ class StadiumMatchEnv(Env):
         self.skipped.clear()
         self._coupon_streak = 0
         self._coupon_longest_streak = 0
-        self._coupon_missed = False
+        self._coupon_series_active = True
         self._coupon_taken_keys.clear()
 
     def _draw_next_from_coupon(self) -> bool:
@@ -1113,15 +1096,15 @@ class StadiumMatchEnv(Env):
 
             if ok:
                 reward += self.step_hit_bonus * weight * self.mode_hit_boost[risk_flag]
-                if not self._coupon_missed:
+                if self._coupon_series_active:
                     self._coupon_streak += 1
-                    self._coupon_longest_streak = self._coupon_streak
+                    self._coupon_longest_streak = max(self._coupon_longest_streak, self._coupon_streak)
                     # progressive (quadratic) bonus for growing streak within coupon
                     reward += self.streak_step_bonus * (self._coupon_streak ** 2)
             else:
                 reward -= (self.step_miss_pen / max(weight, 1e-6)) * self.mode_miss_boost[risk_flag]
-                if not self._coupon_missed:
-                    self._coupon_missed = True
+                if self._coupon_series_active:
+                    self._coupon_series_active = False
 
             if ok:
                 self._global_streak += 1
@@ -1301,7 +1284,7 @@ class StadiumMatchEnv(Env):
         self.bets_in_coupon = 0
         self._coupon_streak = 0
         self._coupon_longest_streak = 0
-        self._coupon_missed = False
+        self._coupon_series_active = True
         self._coupon_taken_keys.clear()
 
         return reward
@@ -1336,11 +1319,7 @@ class StadiumMatchEnv(Env):
 
         n_features = int(self.X.shape[1]) if isinstance(self.X, np.ndarray) else None
 
-        # Sort primarily by hit status (True, then False, then unknown) instead of by date
-        for idx, act, ok, w, known, risk_flag in sorted(
-            self.coupon,
-            key=lambda t: (t[2] is None, not bool(t[2]), t[0]),
-        ):
+        for idx, act, ok, w, known, risk_flag in sorted(self.coupon, key=lambda t: self._sort_key(t[0])):
             if not (0 <= idx < len(self.y)): continue
             m = self.meta[idx]
             home = _safe(m.get("home_team"), "HOME")
@@ -1360,7 +1339,7 @@ class StadiumMatchEnv(Env):
         pct     = 100.0 * w_hits / w_total if w_total else 0.0
         print(f"💰 Koszt kuponu: {cost:.2f}, Punkty: {reward:.0f}/{max_pts:.0f}  "
               f"(trafione wagi: {w_hits:.2f}/{w_total:.2f}  ⇒  {pct:.1f}%)")
-        print(f"📏 Seria kuponu: {self._coupon_longest_streak} | Global: {self._global_streak} "
+        print(f"📏 Seria kuponu: {self._coupon_streak} | Global: {self._global_streak} "
               f"(max {self._global_longest_streak})")
 
         if self.skipped:
@@ -1378,8 +1357,7 @@ class StadiumMatchEnv(Env):
     def render(self, mode="human"):
         total = self.market_counts.sum()
         hist = (self.market_counts / max(total, 1)).round(2)
-        print(f"📦 Kupon: {self.bets_in_coupon} betów | Seria: {self._coupon_streak} "
-              f"(max {self._coupon_longest_streak}) | "
+        print(f"📦 Kupon: {self.bets_in_coupon} betów | Seria: {self._coupon_streak} | "
               f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | "
               f"Global hits: {self.global_correct}/{self.global_bets} | "
               f"Global streak: {self._global_streak} (max {self._global_longest_streak})")
@@ -1818,28 +1796,6 @@ def main() -> None:
                 df_log.to_csv(csv_path, index=False)
                 print(f"📝 Zapisano log budżetów do: {csv_path}")
 
-                # Najdłuższa seria pewniaków oparta o bieżący model
-                meta_pairs: List[Tuple[str, datetime]] = []
-                for m in meta_day:
-                    home = m.get("home_team", "?")
-                    away = m.get("away_team", "?")
-                    start = pd.to_datetime(m.get("start_time", pd.NaT), errors="coerce")
-                    if start is pd.NaT or start is None:
-                        start_dt = datetime.utcnow()
-                    else:
-                        if getattr(start, "tzinfo", None) is None:
-                            start = start.tz_localize("UTC")
-                        start_dt = start.to_pydatetime()
-                    meta_pairs.append((f"{home} vs {away}", start_dt))
-
-                series = select_longest_series(model, X_day, meta_pairs, min_probability=0.6)
-                if series:
-                    print("📈 Najdłuższa seria pewnych typów:")
-                    for match in series:
-                        print(f"   • {match}")
-                else:
-                    print("ℹ️ Brak typów spełniających próg pewności.")
-
                 # Update best & zapis modelu
                 if day_score > best_score or hit_pct > best_hit_pct:
                     best_score = max(best_score, day_score)
@@ -1882,37 +1838,6 @@ def main() -> None:
     print(f"📦 Model zapisany (jeśli poprawiał) w: {BEST_MODEL_PATH}")
     print(f"🧮 VecNormalize w: {VECNORM_PATH}")
     print("======================================================")
-
-
-# ==============================
-#  RL match selection helpers
-# ==============================
-
-def select_longest_series(
-    model: BaseAlgorithm,
-    observations: Sequence[np.ndarray],
-    meta: Sequence[Tuple[str, datetime]],
-    *,
-    min_probability: float = 0.5,
-    action_index: int = 0,
-) -> List[MatchPrediction]:
-    """Zbuduj najdłuższą serię na podstawie prognoz modelu RL.
-
-    Funkcja oblicza rozkład akcji dla każdej obserwacji, przekształca go w
-    prawdopodobieństwa powodzenia i zwraca listę meczów posortowanych
-    malejąco po pewności. Daty i godziny spotkań są ignorowane – liczy się
-    wyłącznie wartość ``probability``. Mecze poniżej ``min_probability`` są
-    odrzucane, dzięki czemu otrzymujemy możliwie najdłuższą serię trafień.
-    """
-
-    matches = predictions_from_rl(
-        model,
-        observations,
-        meta,
-        action_index=action_index,
-    )
-    return longest_confident_series(matches, min_probability=min_probability)
-
 
 # if __name__ == "__main__":
 #     main()
