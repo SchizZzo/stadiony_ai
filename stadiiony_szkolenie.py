@@ -398,10 +398,17 @@ class PolicyMarginCallback(BaseCallback):
                 if hasattr(dist, "dists") and len(dist.dists) >= 1:
                     logits = dist.dists[0].logits  # [batch, 9] dla marketu
                     probs = F.softmax(logits, dim=-1)
-                    top2 = torch.topk(probs, k=2, dim=-1).values[0]  # (2,)
-                    margin = float(top2[0] - top2[1])
-                    top1p = float(top2[0])
-                    env.env_method("set_policy_metrics", pct=top1p, margin_pp=margin, top3=None)
+                    top2 = torch.topk(probs, k=2, dim=-1).values  # [batch, 2]
+                    margins = (top2[:, 0] - top2[:, 1]).cpu().numpy()
+                    top1ps = top2[:, 0].cpu().numpy()
+                    for i, (pct, margin) in enumerate(zip(top1ps, margins)):
+                        env.env_method(
+                            "set_policy_metrics",
+                            pct=float(pct),
+                            margin_pp=float(margin),
+                            top3=None,
+                            indices=[i],
+                        )
         except Exception:
             pass
         return True
