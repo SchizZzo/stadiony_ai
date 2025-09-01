@@ -119,7 +119,8 @@ REQUIRED_COLS_TRAINING: List[str] = [
     "payload_percent_away","payload_percent_home","payload_advice",
     "payload_goals_away","payload_teams_home_league_cards_red__total",
     "payload_winner_name","payload_winner_comment","payload_percent_draw",
-    "id_fp","home_team","away_team","goals_home","goals_away","start_time",
+    "id_fp","home_team","away_team","score_fulltime_home","score_fulltime_away",
+    "score_halftime_home","score_halftime_away","start_time",
 ]
 
 # ==============================
@@ -238,7 +239,7 @@ def _smart_skip_mask(df_raw: pd.DataFrame) -> np.ndarray:
 
 def build_skip_mask(df_raw: pd.DataFrame, *, nan_frac_threshold: float = 0.8) -> np.ndarray:
     META_COLS = {"home_team", "away_team", "id_fp"}
-    TARGETS   = {"goals_home", "goals_away"}
+    TARGETS   = {"score_fulltime_home", "score_fulltime_away", "score_halftime_home", "score_halftime_away"}
     DROP_COLS = {
         "fixture_id", "id_pred", "fetched_at",
         "payload_h2h", "payload_teams_away_logo", "payload_teams_home_logo",
@@ -278,11 +279,11 @@ def prepare_batch(
     fit_if_none: bool = False,
     save_path: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]], PreprocType | None, np.ndarray]:
-    META_COLS = {"home_team", "away_team", "id_fp"}
+    META_COLS = {"home_team", "away_team", "id_fp", "score_halftime_home", "score_halftime_away"}
 
     df = add_missing_columns(df.copy())
 
-    for col in ("goals_home", "goals_away"):
+    for col in ("score_fulltime_home", "score_fulltime_away", "score_halftime_home", "score_halftime_away"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -294,7 +295,7 @@ def prepare_batch(
         "payload_teams_away_league_lineups", "payload_teams_home_league_lineups",
         "payload_league_flag", "payload_league_logo",
     ]
-    df_feat = df.drop(columns=DROP_COLS + ["goals_home", "goals_away"], errors="ignore").copy()
+    df_feat = df.drop(columns=DROP_COLS + ["score_fulltime_home", "score_fulltime_away", "score_halftime_home", "score_halftime_away"], errors="ignore").copy()
 
     skip_mask = build_skip_mask(df_feat, nan_frac_threshold=0.8)
 
@@ -312,9 +313,20 @@ def prepare_batch(
     else:
         raise ValueError("Preprocessor is None and fit_if_none is False.")
 
-    y = df[["goals_home", "goals_away"]].astype(np.float32).to_numpy()
+    y = df[["score_fulltime_home", "score_fulltime_away"]].astype(np.float32).to_numpy()
 
-    meta_cols = [c for c in ("id_fp", "home_team", "away_team", "start_time") if c in df.columns]
+    meta_cols = [
+        c
+        for c in (
+            "id_fp",
+            "home_team",
+            "away_team",
+            "start_time",
+            "score_halftime_home",
+            "score_halftime_away",
+        )
+        if c in df.columns
+    ]
     meta = df[meta_cols].to_dict(orient="records")
 
     def _col_val(cname: str, i: int):
@@ -923,8 +935,8 @@ class StadiumMatchEnv(Env):
             return self._get_observation(), reward, terminated, False, info
 
         h_goals, a_goals = self.y[idx]
-        h_ht = self.meta[idx].get("goals_home_ht")
-        a_ht = self.meta[idx].get("goals_away_ht")
+        h_ht = self.meta[idx].get("score_halftime_home")
+        a_ht = self.meta[idx].get("score_halftime_away")
         is_unknown = (
             np.isnan(h_goals) or np.isnan(a_goals) or
             h_ht is None or a_ht is None or
@@ -1423,7 +1435,7 @@ def build_global_preprocessor_from_batches(
         "payload_h2h", "payload_teams_away_logo", "payload_teams_home_logo",
         "payload_teams_away_league_lineups", "payload_teams_home_league_lineups",
         "payload_league_flag", "payload_league_logo",
-        "goals_home", "goals_away"
+        "score_fulltime_home", "score_fulltime_away", "score_halftime_home", "score_halftime_away"
         ]
     df_feat = df_all.drop(columns=[c for c in DROP_COLS if c in df_all.columns], errors="ignore").copy()
     _convert_start_time_inplace(df_feat)
