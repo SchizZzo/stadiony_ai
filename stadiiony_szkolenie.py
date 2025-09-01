@@ -427,7 +427,7 @@ class StadiumMatchEnv(Env):
     metadata = {"render.modes": ["human"]}
     BET_NAMES = [
         "1/1",
-        "1X",
+        "1/X",
         "1/2",
         "X/1",
         "X/X",
@@ -1543,7 +1543,7 @@ def main() -> None:
     except Exception:
         pass
 
-    BASE_DIR        = "/content/drive/MyDrive/STADIONY_DANE/NOWA_ERA"
+    BASE_DIR        = "/content/drive/MyDrive/STADIONY_DANE/NOWA_ERA_LAMAKI"
     BEST_MODEL_PATH = f"{BASE_DIR}/best_model.zip"
     PREPROCESS_PATH = f"{BASE_DIR}/preprocess.pkl"
     VECNORM_PATH    = f"{BASE_DIR}/vecnormalize.pkl"
