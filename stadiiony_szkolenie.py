@@ -449,7 +449,7 @@ class StadiumMatchEnv(Env):
         coupon_price: float = 2.0,
         skip_mask: Optional[np.ndarray] = None,
         min_prior_for_bet: float = 0.65,       # legacy
-        auto_skip_penalty_coef: float = 0.2,   # delikatna kara za auto-skip
+        low_prior_penalty_coef: float = 0.2,   # kara za próbę gry poniżej twardej bramki
         seed: int = 42,
     ):
         super().__init__()
@@ -492,7 +492,7 @@ class StadiumMatchEnv(Env):
 
         # Selective prediction
         self.min_prior_for_bet = float(min_prior_for_bet)      # legacy
-        self.auto_skip_penalty_coef = float(auto_skip_penalty_coef)
+        self.low_prior_penalty_coef = float(low_prior_penalty_coef)
 
         # Trybowe progi (nadpisywane w curriculum; bazowo niższe)
         self.min_prior_sure  = 0.54
@@ -971,36 +971,7 @@ class StadiumMatchEnv(Env):
         # --- SELECTIVE (twarde) bramki zależne od trybu + margin polityki (dla pewniaka)
         gate = self.min_prior_sure if is_sure else self.min_prior_value
         if skip_flag == 0 and prior_score < gate:
-            delta_auto = -self.auto_skip_penalty_coef * (gate - prior_score)
-            reward += delta_auto
-            self._skip_match(idx, "auto_skip_low_prior_mode", delta_auto)
-            if not self._draw_next_from_coupon():
-                if self.bets_in_coupon >= self.min_bets_to_close and self.remaining_units >= self.coupon_price:
-                    before_reward = self.total_reward
-                    before_max = self.total_max_points
-                    before_hits = self.global_correct
-                    before_bets = self.global_bets
-                    reward += self._close_coupon()
-                    info.update({
-                        "coupon_closed": True,
-                        "emergency_close": False,
-                        "coupon_reward": float(self.total_reward - before_reward),
-                        "coupon_max": float(self.total_max_points - before_max),
-                        "coupon_hits": int(self.global_correct - before_hits),
-                        "coupon_bets": int(self.global_bets - before_bets),
-                        "coupon_total": int(getattr(self, "_last_coupon_total", 0)),
-                        "coupon_correct": int(getattr(self, "_last_coupon_correct", 0)),
-                        "perfect_coupon": bool(
-                            getattr(self, "_last_coupon_total", 0) > 0 and
-                            getattr(self, "_last_coupon_total", 0) == getattr(self, "_last_coupon_correct", 0)
-                        ),
-                    })
-                else:
-                    reward += self._emergency_close()
-                    info.update(self._last_close_info)
-                reward, info, terminated = self._after_coupon_closed(reward, info)
-            info = self._inject_common_info(info)
-            return self._get_observation(), reward, terminated, False, info
+            reward -= self.low_prior_penalty_coef * (gate - prior_score)
 
         if skip_flag == 0 and is_sure and (self._policy_margin_pp is not None):
             if self._policy_margin_pp < self.min_policy_margin:
@@ -1722,7 +1693,7 @@ def main() -> None:
                             skip_mask=SK,
                             seed=seed,
                             min_prior_for_bet=0.65,
-                            auto_skip_penalty_coef=0.2,
+                            low_prior_penalty_coef=0.2,
                         )
                         # curriculum gates:
                         base_env.min_prior_sure  = float(sure_gate)
