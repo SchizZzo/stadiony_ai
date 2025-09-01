@@ -20,7 +20,7 @@ Zmiany vs V3.9:
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Union
+from typing import Any, Dict, List, Tuple, Optional, Union, Sequence
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.base_class import BaseAlgorithm
 
 import re
 from sklearn.compose import ColumnTransformer
@@ -46,6 +47,9 @@ import joblib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from datetime import datetime
+from match_selector import rl_confident_series, MatchPrediction
 
 # --- DODATKOWE IMPORTY DLA ROBUST LOADERA ---
 import zipfile, io
@@ -1848,6 +1852,37 @@ def main() -> None:
     print(f"📦 Model zapisany (jeśli poprawiał) w: {BEST_MODEL_PATH}")
     print(f"🧮 VecNormalize w: {VECNORM_PATH}")
     print("======================================================")
+
+
+# ==============================
+#  RL match selection helpers
+# ==============================
+
+def select_longest_series(
+    model: BaseAlgorithm,
+    observations: Sequence[np.ndarray],
+    meta: Sequence[Tuple[str, datetime]],
+    *,
+    min_probability: float = 0.5,
+    action_index: int = 0,
+) -> List[MatchPrediction]:
+    """Zbuduj najdłuższą serię na podstawie prognoz modelu RL.
+
+    Funkcja oblicza rozkład akcji dla każdej obserwacji, przekształca go w
+    prawdopodobieństwa powodzenia i zwraca listę meczów posortowanych
+    malejąco po pewności. Daty i godziny spotkań są ignorowane – liczy się
+    wyłącznie wartość ``probability``. Mecze poniżej ``min_probability`` są
+    odrzucane, dzięki czemu otrzymujemy możliwie najdłuższą serię trafień.
+    """
+
+    return rl_confident_series(
+        model,
+        observations,
+        meta,
+        min_probability=min_probability,
+        action_index=action_index,
+    )
+
 
 # if __name__ == "__main__":
 #     main()
