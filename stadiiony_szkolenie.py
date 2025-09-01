@@ -1814,6 +1814,28 @@ def main() -> None:
                 df_log.to_csv(csv_path, index=False)
                 print(f"📝 Zapisano log budżetów do: {csv_path}")
 
+                # Najdłuższa seria pewniaków oparta o bieżący model
+                meta_pairs: List[Tuple[str, datetime]] = []
+                for m in meta_day:
+                    home = m.get("home_team", "?")
+                    away = m.get("away_team", "?")
+                    start = pd.to_datetime(m.get("start_time", pd.NaT), errors="coerce")
+                    if start is pd.NaT or start is None:
+                        start_dt = datetime.utcnow()
+                    else:
+                        if getattr(start, "tzinfo", None) is None:
+                            start = start.tz_localize("UTC")
+                        start_dt = start.to_pydatetime()
+                    meta_pairs.append((f"{home} vs {away}", start_dt))
+
+                series = select_longest_series(model, X_day, meta_pairs, min_probability=0.6)
+                if series:
+                    print("📈 Najdłuższa seria pewnych typów:")
+                    for match in series:
+                        print(f"   • {match}")
+                else:
+                    print("ℹ️ Brak typów spełniających próg pewności.")
+
                 # Update best & zapis modelu
                 if day_score > best_score or hit_pct > best_hit_pct:
                     best_score = max(best_score, day_score)
