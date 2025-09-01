@@ -384,7 +384,7 @@ class PolicyMarginCallback(BaseCallback):
                 dist = self.model.policy.get_distribution(obs_t)
                 # MultiCategorical → dist.dists: [market, skip, close, risk]
                 if hasattr(dist, "dists") and len(dist.dists) >= 1:
-                    logits = dist.dists[0].logits  # [batch, 11] dla marketu
+                    logits = dist.dists[0].logits  # [batch, 9] dla marketu
                     probs = F.softmax(logits, dim=-1)
                     top2 = torch.topk(probs, k=2, dim=-1).values[0]  # (2,)
                     margin = float(top2[0] - top2[1])
@@ -400,7 +400,7 @@ class PolicyMarginCallback(BaseCallback):
 class StadiumMatchEnv(Env):
     """
     Akcja = (market_act, skip_flag, close_flag, risk_flag)
-      • market_act ∈ {0..10}
+      • market_act ∈ {0..8}
       • skip_flag ∈ {0,1}
       • close_flag ∈ {0,1}
       • risk_flag ∈ {0=pewniak, 1=value}
@@ -430,12 +430,7 @@ class StadiumMatchEnv(Env):
         self.match_bonus_per_correct = 1.2
         self.perfect_bonus_per_cost = 6.0
         self.wrong_penalty = 12.0
-        self.wide_weights = {
-            2: 0.60, 3: 0.60, 4: 0.50,
-            10: 0.90,
-            7: 1.05, 9: 1.05,
-            5: 1.05, 6: 1.05,
-        }
+        self.wide_weights = {}
         self.length_bonus_per_bet = 1.0
         self.step_hit_bonus = 0.6
         self.step_miss_pen  = 0.8
@@ -448,7 +443,7 @@ class StadiumMatchEnv(Env):
         self.diversity_step_bonus  = 0.8
         self.diversity_close_bonus = 0.5
         self.monotony_hard_penalty = 0.0
-        self.market_specific_penalty = {10: 0.06}
+        self.market_specific_penalty = {}
 
         self.prior_topk = 2
         self.prior_threshold_low = 0.18
@@ -490,7 +485,7 @@ class StadiumMatchEnv(Env):
         self.coupon_cost: float = 0.0
         self.bets_in_coupon = 0
 
-        self.num_markets = 11
+        self.num_markets = 9
         self.market_counts = np.zeros(self.num_markets, dtype=np.int32)
 
         self._all_idxs: List[int] = []
@@ -517,8 +512,8 @@ class StadiumMatchEnv(Env):
         self.hist_dim = self.num_markets
         self.prior_dim = self.num_markets
 
-        # --- KONTEKST DNIA (11 mean + 11 max + 1 count_norm) ---
-        self.ctx_dim = 23
+        # --- KONTEKST DNIA (9 mean + 9 max + 1 count_norm) ---
+        self.ctx_dim = self.num_markets * 2 + 1
         self._day_ctx = np.zeros(self.ctx_dim, dtype=np.float32)
 
         obs_low  = np.concatenate([
@@ -536,7 +531,7 @@ class StadiumMatchEnv(Env):
         self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
 
         # 4-wymiarowe MultiDiscrete
-        self.action_space = spaces.MultiDiscrete([11, 2, 2, 2])
+        self.action_space = spaces.MultiDiscrete([self.num_markets, 2, 2, 2])
 
         self.total_reward = 0.0
         self.total_max_points = 0.0
@@ -675,16 +670,16 @@ class StadiumMatchEnv(Env):
     def _compute_day_context(self, idxs: List[int]) -> np.ndarray:
         """
         Agreguje priory ze WSZYSTKICH meczów dnia i zwraca stały wektor:
-        [priors_mean(11), priors_max(11), count_norm(1)] ∈ [0,1].
+        [priors_mean(9), priors_max(9), count_norm(1)] ∈ [0,1].
         """
         if not idxs:
-            return np.zeros(23, dtype=np.float32)
+            return np.zeros(self.ctx_dim, dtype=np.float32)
 
         priors_stack = []
         for i in idxs:
-            pri = self._market_priors_for_idx(i)  # (11,)
+            pri = self._market_priors_for_idx(i)  # (9,)
             priors_stack.append(pri)
-        P = np.stack(priors_stack, axis=0)  # [N, 11]
+        P = np.stack(priors_stack, axis=0)  # [N, 9]
 
         priors_mean = np.clip(np.nanmean(P, axis=0), 0.0, 1.0)
         priors_max  = np.clip(np.nanmax(P,  axis=0), 0.0, 1.0)
@@ -768,21 +763,17 @@ class StadiumMatchEnv(Env):
         ], dtype=np.float32)
 
     @staticmethod
-    def _evaluate_prediction(h: int, a: int, action: int) -> bool:
-        btts = h > 0 and a > 0
-        goals = h + a
+    def _evaluate_prediction(h_ht: int, a_ht: int, h_ft: int, a_ft: int, action: int) -> bool:
         return [
-            h > a,   # 0  1
-            h < a,   # 1  2
-            h >= a,  # 2  1X
-            h <= a,  # 3  X2
-            h != a,  # 4  12
-            btts,    # 5  BTTS Yes
-            not btts,      # 6  BTTS No
-            goals > 2.5,   # 7  Over 2.5
-            goals <= 2.5,  # 8  Under 2.5
-            goals > 3.5,   # 9  Over 3.5
-            goals <= 3.5,  # 10 Under 3.5
+            h_ht > a_ht and h_ft > a_ft,   # 0  1/1
+            h_ht > a_ht and h_ft == a_ft,  # 1  1/X
+            h_ht > a_ht and h_ft < a_ft,   # 2  1/2
+            h_ht == a_ht and h_ft > a_ft,  # 3  X/1
+            h_ht == a_ht and h_ft == a_ft, # 4  X/X
+            h_ht == a_ht and h_ft < a_ft,  # 5  X/2
+            h_ht < a_ht and h_ft > a_ft,   # 6  2/1
+            h_ht < a_ht and h_ft == a_ft,  # 7  2/X
+            h_ht < a_ht and h_ft < a_ft,   # 8  2/2
         ][action]
 
     def reset(self, seed: int | None = None, options=None):
@@ -932,7 +923,13 @@ class StadiumMatchEnv(Env):
             return self._get_observation(), reward, terminated, False, info
 
         h_goals, a_goals = self.y[idx]
-        is_unknown = (np.isnan(h_goals) or np.isnan(a_goals))
+        h_ht = self.meta[idx].get("goals_home_ht")
+        a_ht = self.meta[idx].get("goals_away_ht")
+        is_unknown = (
+            np.isnan(h_goals) or np.isnan(a_goals) or
+            h_ht is None or a_ht is None or
+            pd.isna(h_ht) or pd.isna(a_ht)
+        )
 
         priors = self._market_priors_for_idx(idx)
         prior_score = float(priors[market_act])
@@ -1035,7 +1032,9 @@ class StadiumMatchEnv(Env):
 
         weight = self.wide_weights.get(market_act, 1.0)
         if not is_unknown:
-            correct = self._evaluate_prediction(int(h_goals), int(a_goals), market_act)
+            correct = self._evaluate_prediction(
+                int(h_ht), int(a_ht), int(h_goals), int(a_goals), market_act
+            )
         else:
             correct = None
 
