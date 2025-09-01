@@ -1081,6 +1081,7 @@ class StadiumMatchEnv(Env):
             return self._get_observation(), reward, terminated, False, info
 
         # --- Dodawanie do kuponu + STREAK LOGIKA (kupon + global) ---
+        missed = False
         if is_unknown:
             self.coupon.append((idx, market_act, None, weight, False, risk_flag))
             for k in keys_now:
@@ -1090,6 +1091,7 @@ class StadiumMatchEnv(Env):
                 reward += self.prior_align_bonus_unknown * weight
         else:
             ok = bool(correct)
+            missed = not ok
             self.coupon.append((idx, market_act, ok, weight, True, risk_flag))
             for k in keys_now:
                 self._coupon_taken_keys.add(k)
@@ -1148,6 +1150,34 @@ class StadiumMatchEnv(Env):
             reward -= self.same_market_penalty * (ratio - self.max_same_market_ratio) * 10.0
 
         self.bets_in_coupon += 1
+
+        if missed:
+            if self.remaining_units >= self.coupon_price:
+                before_reward = self.total_reward
+                before_max = self.total_max_points
+                before_hits = self.global_correct
+                before_bets = self.global_bets
+                reward += self._close_coupon()
+                info.update({
+                    "coupon_closed": True,
+                    "emergency_close": False,
+                    "coupon_reward": float(self.total_reward - before_reward),
+                    "coupon_max": float(self.total_max_points - before_max),
+                    "coupon_hits": int(self.global_correct - before_hits),
+                    "coupon_bets": int(self.global_bets - before_bets),
+                    "coupon_total": int(getattr(self, "_last_coupon_total", 0)),
+                    "coupon_correct": int(getattr(self, "_last_coupon_correct", 0)),
+                    "perfect_coupon": bool(
+                        getattr(self, "_last_coupon_total", 0) > 0 and
+                        getattr(self, "_last_coupon_total", 0) == getattr(self, "_last_coupon_correct", 0)
+                    ),
+                })
+                reward, info, terminated = self._after_coupon_closed(reward, info)
+                info = self._inject_common_info(info)
+                return self._get_observation(), reward, terminated, False, info
+            else:
+                info = self._inject_common_info(info)
+                return self._get_observation(), reward, True, False, info
 
         if self.bets_in_coupon >= self.max_bets_to_close:
             if self.remaining_units >= self.coupon_price:
