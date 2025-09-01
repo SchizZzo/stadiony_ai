@@ -1711,7 +1711,22 @@ def main() -> None:
                 if os.path.exists(VECNORM_PATH):
                     try:
                         vecnorm = VecNormalize.load(VECNORM_PATH, vec_env)
-                        print("📥 Załadowano VecNormalize.")
+                        loaded_shape = int(np.prod(vecnorm.obs_rms.mean.shape))
+                        env_shape = int(np.prod(vec_env.observation_space.shape))
+                        if loaded_shape != env_shape:
+                            print(
+                                f"⚠️  Niezgodny kształt VecNormalize ({loaded_shape} ≠ {env_shape}) — inicjalizuję nowe statystyki."
+                            )
+                            vecnorm = VecNormalize(
+                                vec_env,
+                                norm_obs=True,
+                                norm_reward=True,
+                                clip_obs=10.0,
+                                clip_reward=10.0,
+                                gamma=0.995,
+                            )
+                        else:
+                            print("📥 Załadowano VecNormalize.")
                     except Exception as e:
                         print(f"⚠️  Błąd load VecNormalize: {e} — inicjalizuję nowe statystyki.")
                         vecnorm = VecNormalize(
