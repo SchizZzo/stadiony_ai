@@ -1336,7 +1336,11 @@ class StadiumMatchEnv(Env):
 
         n_features = int(self.X.shape[1]) if isinstance(self.X, np.ndarray) else None
 
-        for idx, act, ok, w, known, risk_flag in sorted(self.coupon, key=lambda t: self._sort_key(t[0])):
+        # Sort primarily by hit status (True, then False, then unknown) instead of by date
+        for idx, act, ok, w, known, risk_flag in sorted(
+            self.coupon,
+            key=lambda t: (t[2] is None, not bool(t[2]), t[0]),
+        ):
             if not (0 <= idx < len(self.y)): continue
             m = self.meta[idx]
             home = _safe(m.get("home_team"), "HOME")
