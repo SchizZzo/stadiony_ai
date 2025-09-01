@@ -638,8 +638,10 @@ class StadiumMatchEnv(Env):
         return float(1.0 / (1.0 + np.exp(-k * x)))
 
     def _market_priors_for_idx(self, idx: int) -> np.ndarray:
+        """Szacuje prawdopodobieństwa dla 9 rynków HT/FT."""
         if not (0 <= idx < len(self.meta)):
             return np.zeros(self.num_markets, dtype=np.float32)
+
         m = self.meta[idx]
         ph = float(m.get("prior_ph", np.nan))
         pa = float(m.get("prior_pa", np.nan))
@@ -647,35 +649,33 @@ class StadiumMatchEnv(Env):
         gh = float(m.get("prior_gh", np.nan))
         ga = float(m.get("prior_ga", np.nan))
 
-        if not np.isfinite(ph): ph = 1/3
-        if not np.isfinite(pa): pa = 1/3
-        if not np.isfinite(pd_): pd_ = 1/3
+        if not np.isfinite(ph): ph = 1 / 3
+        if not np.isfinite(pa): pa = 1 / 3
+        if not np.isfinite(pd_): pd_ = 1 / 3
         if not np.isfinite(gh): gh = 1.1
         if not np.isfinite(ga): ga = 1.0
 
-        win_margin = ph - pa
-        p1 = self._sigmoid(win_margin)
-        p2 = self._sigmoid(-win_margin)
-
-        p1x = max(p1, pd_ * 0.6) * 0.85
-        px2 = max(p2, pd_ * 0.6) * 0.85
-        p12 = max(1.0 - pd_, max(p1, p2) * 0.7) * 0.75
-
-        eg = max(0.0, gh) + max(0.0, ga)
-        p_btts_yes = self._sigmoid(min(gh, ga) - 0.8, k=3.5)
-        p_btts_no  = 1.0 - p_btts_yes
-
-        p_over_2_5  = self._sigmoid(eg - 2.5, k=2.5)
-        p_under_2_5 = 1.0 - p_over_2_5
-        p_over_3_5  = self._sigmoid(eg - 3.5, k=2.5)
-        p_under_3_5 = 1.0 - p_over_3_5
+        # Przybliżenie rozkładu przerwowego na podstawie różnicy goli
+        margin_ht = (gh - ga) * 0.6
+        p_ht1 = self._sigmoid(margin_ht)
+        p_ht2 = self._sigmoid(-margin_ht)
+        p_htx = max(0.0, 1.0 - p_ht1 - p_ht2)
 
         priors = np.array([
-            p1, p2, p1x, px2, p12,
-            p_btts_yes, p_btts_no,
-            p_over_2_5, p_under_2_5,
-            p_over_3_5, p_under_3_5
+            p_ht1 * ph,  # 1/1
+            p_ht1 * pd_, # 1/X
+            p_ht1 * pa,  # 1/2
+            p_htx * ph,  # X/1
+            p_htx * pd_, # X/X
+            p_htx * pa,  # X/2
+            p_ht2 * ph,  # 2/1
+            p_ht2 * pd_, # 2/X
+            p_ht2 * pa,  # 2/2
         ], dtype=np.float32)
+
+        s = float(priors.sum())
+        if s > 0:
+            priors /= s
         return np.clip(priors, 0.0, 1.0)
 
     # === NOWE: KONTEKST DNIA ===
