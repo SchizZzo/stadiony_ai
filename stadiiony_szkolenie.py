@@ -418,6 +418,17 @@ class StadiumMatchEnv(Env):
       • risk_flag ∈ {0=pewniak, 1=value}
     """
     metadata = {"render.modes": ["human"]}
+    BET_NAMES = [
+        "1/1",
+        "1X",
+        "1/2",
+        "X/1",
+        "X/X",
+        "X/2",
+        "2/1",
+        "2/X",
+        "2/2",
+    ]
 
     def __init__(
         self,
@@ -1333,7 +1344,7 @@ class StadiumMatchEnv(Env):
     def _render(self, cost: float, reward: float, correct: int, total: int, max_pts: float) -> None:
         used = self.total_units - self.remaining_units
         print(f"\n🎯 Użyto: {used:.2f}/{self.total_units:.2f} jednostek")
-        bet_names = ["1","2","1X","X2","12","BTTS Yes","BTTS No",">2.5","≤2.5",">3.5","≤3.5"]
+        bet_names = self.BET_NAMES
 
         def _safe(txt: Any, fallback: str) -> str:
             if txt is None: return fallback
@@ -1396,13 +1407,20 @@ class StadiumMatchEnv(Env):
                 print(f"   - {home} vs {away} ({match_datetime}), powód: {reason}, {efekt}: {delta:+.2f}")
 
     def render(self, mode="human"):
+        bet_names = self.BET_NAMES
         total = self.market_counts.sum()
         hist = (self.market_counts / max(total, 1)).round(2)
-        print(f"📦 Kupon: {self.bets_in_coupon} betów | Seria: {self._coupon_streak} | "
-              f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | "
-              f"Global hits: {self.global_correct}/{self.global_bets} | "
-              f"Global streak: {self._global_streak} (max {self._global_longest_streak})")
-        print(f"📈 Histogram rynków: {hist.tolist()}")
+        named_hist = {
+            bet_names[i]: float(hist[i])
+            for i in range(min(len(hist), len(bet_names)))
+        }
+        print(
+            f"📦 Kupon: {self.bets_in_coupon} betów | Seria: {self._coupon_streak} | "
+            f"Użyto {self.total_units - self.remaining_units:.1f}/{self.total_units:.1f} j. | "
+            f"Global hits: {self.global_correct}/{self.global_bets} | "
+            f"Global streak: {self._global_streak} (max {self._global_longest_streak})"
+        )
+        print(f"📈 Histogram rynków: {named_hist}")
         if self.skipped:
             print("⏭ Ostatnie skipy:")
             for idx, reason, delta in self.skipped[-5:]:
