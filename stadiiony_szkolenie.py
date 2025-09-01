@@ -49,7 +49,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from datetime import datetime
-from match_selector import rl_confident_series, MatchPrediction
+from match_selector import (
+    MatchPrediction,
+    predictions_from_rl,
+    longest_confident_series,
+)
 
 # --- DODATKOWE IMPORTY DLA ROBUST LOADERA ---
 import zipfile, io
@@ -1875,13 +1879,13 @@ def select_longest_series(
     odrzucane, dzięki czemu otrzymujemy możliwie najdłuższą serię trafień.
     """
 
-    return rl_confident_series(
+    matches = predictions_from_rl(
         model,
         observations,
         meta,
-        min_probability=min_probability,
         action_index=action_index,
     )
+    return longest_confident_series(matches, min_probability=min_probability)
 
 
 # if __name__ == "__main__":
