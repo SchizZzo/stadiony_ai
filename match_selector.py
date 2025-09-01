@@ -30,6 +30,11 @@ class MatchPrediction:
     start_time: datetime
     probability: float
 
+    def __str__(self) -> str:
+        """Human-readable representation including kick-off time."""
+        kickoff = self.start_time.strftime("%Y-%m-%d %H:%M")
+        return f"{self.name} ({kickoff}): {self.probability:.0%}"
+
 
 def rank_by_probability(matches: Iterable[MatchPrediction]) -> List[MatchPrediction]:
     """Return matches sorted descending by probability.
@@ -43,6 +48,27 @@ def rank_by_probability(matches: Iterable[MatchPrediction]) -> List[MatchPredict
     """
 
     return sorted(matches, key=lambda m: m.probability, reverse=True)
+
+
+def max_series(
+    matches: Iterable[MatchPrediction], *, limit: int | None = None
+) -> List[MatchPrediction]:
+    """Return matches ordered to maximise a potential streak.
+
+    The function simply ranks matches by probability, ignoring kick-off times
+    or any other metadata. Optionally the result can be truncated to ``limit``
+    items which allows selecting only the top-N predictions for a coupon.
+
+    Args:
+        matches: Iterable of :class:`MatchPrediction`.
+        limit: Maximum number of matches to return. ``None`` keeps all.
+
+    Returns:
+        A list of matches ordered from most to least probable.
+    """
+
+    ranked = rank_by_probability(matches)
+    return ranked if limit is None else ranked[:limit]
 
 
 def longest_confident_series(
@@ -116,6 +142,36 @@ def rl_confident_series(
     return longest_confident_series(matches, min_probability=min_probability)
 
 
+def rl_max_series(
+    model: BaseAlgorithm,
+    observations: Sequence[np.ndarray],
+    meta: Sequence[Tuple[str, datetime]],
+    *,
+    limit: int | None = None,
+    action_index: int = 0,
+) -> List[MatchPrediction]:
+    """Build the highest-confidence streak using an RL model.
+
+    This helper converts the model outputs into ``MatchPrediction`` objects and
+    then orders them purely by probability. The kick-off times are ignored so
+    the returned list represents the best theoretical series regardless of
+    chronology.
+
+    Args:
+        model: Trained RL model compatible with ``stable_baselines3``.
+        observations: Sequence of environment observations for each match.
+        meta: Sequence of ``(name, start_time)`` pairs describing matches.
+        limit: Optional maximum number of matches to return.
+        action_index: Index of the action interpreted as a "bet".
+
+    Returns:
+        List of matches ordered by descending probability.
+    """
+
+    matches = predictions_from_rl(model, observations, meta, action_index=action_index)
+    return max_series(matches, limit=limit)
+
+
 if __name__ == "__main__":
     sample_matches = [
         MatchPrediction("Team A vs Team B", datetime(2025, 6, 1, 18, 0), 0.72),
@@ -123,6 +179,10 @@ if __name__ == "__main__":
         MatchPrediction("Team E vs Team F", datetime(2025, 5, 30, 16, 0), 0.81),
     ]
 
-    series = longest_confident_series(sample_matches, min_probability=0.6)
-    for match in series:
-        print(f"{match.name}: {match.probability:.0%}")
+    print("Top two matches by confidence:")
+    for match in max_series(sample_matches, limit=2):
+        print(match)
+
+    print("\nMatches above 60% probability:")
+    for match in longest_confident_series(sample_matches, min_probability=0.6):
+        print(match)
