@@ -740,9 +740,10 @@ class StadiumMatchEnv(Env):
         return info
 
     def _build_all_idxs(self):
-        valid = [i for i in range(len(self.X)) if not bool(self.skip_mask[i])]
-        valid.sort(key=self._sort_key)
-        self._all_idxs = valid
+        """Build index list without excluding previously skipped matches."""
+        all_idxs = list(range(len(self.X)))
+        all_idxs.sort(key=self._sort_key)
+        self._all_idxs = all_idxs
 
     def _reset_coupon_pool(self):
         self._coupon_pool = list(self._all_idxs)
